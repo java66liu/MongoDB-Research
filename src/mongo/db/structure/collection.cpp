@@ -31,6 +31,7 @@
 #include "mongo/db/structure/collection.h"
 
 #include "mongo/base/counter.h"
+#include "mongo/base/owned_pointer_map.h"
 #include "mongo/db/clientcursor.h"
 #include "mongo/db/commands/server_status.h"
 #include "mongo/db/curop.h"
@@ -47,6 +48,27 @@
 
 namespace mongo {
 
+    std::string CompactOptions::toString() const {
+        std::stringstream ss;
+        ss << "paddingMode: ";
+        switch ( paddingMode ) {
+        case NONE:
+            ss << "NONE";
+            break;
+        case PRESERVE:
+            ss << "PRESERVE";
+            break;
+        case MANUAL:
+            ss << "MANUAL (" << paddingBytes << " + ( doc * " << paddingFactor <<") )";
+        }
+
+        ss << " validateDocuments: " << validateDocuments;
+
+        return ss.str();
+    }
+
+    // ----
+
     Collection::Collection( const StringData& fullNS,
                             NamespaceDetails* details,
                             Database* database )
@@ -60,6 +82,7 @@ namespace mongo {
                            &database->getExtentManager(),
                            _ns.coll() == "system.indexes" );
         _magic = 1357924;
+        _indexCatalog.init();
     }
 
     Collection::~Collection() {
@@ -101,6 +124,21 @@ namespace mongo {
         if ( _details->isCapped() )
             return new CappedIterator( this, start, tailable, dir );
         return new FlatIterator( this, start, dir );
+    }
+
+    int64_t Collection::countTableScan( const MatchExpression* expression ) {
+        scoped_ptr<CollectionIterator> iterator( getIterator( DiskLoc(),
+                                                              false,
+                                                              CollectionScanParams::FORWARD ) );
+        int64_t count = 0;
+        while ( !iterator->isEOF() ) {
+            DiskLoc loc = iterator->getNext();
+            BSONObj obj = docFor( loc );
+            if ( expression->matchesBSON( obj ) )
+                count++;
+        }
+
+        return count;
     }
 
     BSONObj Collection::docFor( const DiskLoc& loc ) {
@@ -234,10 +272,10 @@ namespace mongo {
         /* duplicate key check. we descend the btree twice - once for this check, and once for the actual inserts, further
            below.  that is suboptimal, but it's pretty complicated to do it the other way without rollbacks...
         */
-        OwnedPointerVector<UpdateTicket> updateTickets;
-        updateTickets.mutableVector().resize(_indexCatalog.numIndexesTotal());
-        for (int i = 0; i < _indexCatalog.numIndexesTotal(); ++i) {
-            IndexDescriptor* descriptor = _indexCatalog.getDescriptor( i );
+        OwnedPointerMap<IndexDescriptor*,UpdateTicket> updateTickets;
+        IndexCatalog::IndexIterator ii = _indexCatalog.getIndexIterator( true );
+        while ( ii.more() ) {
+            IndexDescriptor* descriptor = ii.next();
             IndexAccessMethod* iam = _indexCatalog.getIndex( descriptor );
 
             InsertDeleteOptions options;
@@ -245,9 +283,9 @@ namespace mongo {
             options.dupsAllowed =
                 !(KeyPattern::isIdKeyPattern(descriptor->keyPattern()) || descriptor->unique())
                 || ignoreUniqueIndex(descriptor);
-            updateTickets.mutableVector()[i] = new UpdateTicket();
-            Status ret = iam->validateUpdate(objOld, objNew, oldLocation, options,
-                                             updateTickets.mutableVector()[i]);
+            UpdateTicket* updateTicket = new UpdateTicket();
+            updateTickets.mutableMap()[descriptor] = updateTicket;
+            Status ret = iam->validateUpdate(objOld, objNew, oldLocation, options, updateTicket );
             if ( !ret.isOK() ) {
                 return StatusWith<DiskLoc>( ret );
             }
@@ -297,12 +335,13 @@ namespace mongo {
         if ( debug )
             debug->keyUpdates = 0;
 
-        for (int i = 0; i < _indexCatalog.numIndexesTotal(); ++i) {
-            IndexDescriptor* descriptor = _indexCatalog.getDescriptor( i );
+        ii = _indexCatalog.getIndexIterator( true );
+        while ( ii.more() ) {
+            IndexDescriptor* descriptor = ii.next();
             IndexAccessMethod* iam = _indexCatalog.getIndex( descriptor );
 
             int64_t updatedKeys;
-            Status ret = iam->update(*updateTickets.vector()[i], &updatedKeys);
+            Status ret = iam->update(*updateTickets.mutableMap()[descriptor], &updatedKeys);
             if ( !ret.isOK() )
                 return StatusWith<DiskLoc>( ret );
             if ( debug )

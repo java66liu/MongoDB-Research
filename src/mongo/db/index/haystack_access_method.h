@@ -29,7 +29,7 @@
 #pragma once
 
 #include "mongo/base/status.h"
-#include "mongo/db/index/btree_access_method_internal.h"
+#include "mongo/db/index/btree_based_access_method.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/jsobj.h"
 
@@ -55,7 +55,7 @@ namespace mongo {
     public:
         using BtreeBasedAccessMethod::_descriptor;
 
-        HaystackAccessMethod(BtreeInMemoryState* btreeState);
+        HaystackAccessMethod(IndexCatalogEntry* btreeState);
         virtual ~HaystackAccessMethod() { }
 
         // Not implemented.

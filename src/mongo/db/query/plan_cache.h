@@ -28,11 +28,13 @@
 
 #pragma once
 
+#include <set>
 #include <boost/thread/mutex.hpp>
 #include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/index_tag.h"
 #include "mongo/db/query/query_planner_params.h"
+#include "mongo/platform/atomic_word.h"
 
 namespace mongo {
 
@@ -41,29 +43,14 @@ namespace mongo {
     struct QuerySolutionNode;
 
     /**
-     * TODO: Debug commands:
-     * 1. show canonical form of query
-     * 2. show plans generated for query without (and with) cache
-     * 3. print out cache.
-     * 4. clear all elements from cache
-     * 5. pin and unpin cached solutions
-     */
-
-    /**
      * TODO HK notes
 
-     * must cache query w/shape, not exact data.
-
      * cache should be LRU with some cap on size
-
-     * order doesn't matter: ensure that cache entry for query={a:1, b:1} same for query={b:1, a:1}
-
-     * cache whenever possible
 
      * write ops should invalidate but tell plan_cache there was a write op, don't enforce policy elsewhere,
        enforce here.
 
-     * cache key is sort + query shape
+     * cache key is sort + query shape + projection
 
      * {x:1} and {x:{$gt:7}} not same shape for now -- operator matters
      */
@@ -128,9 +115,7 @@ namespace mongo {
          */
         std::string toString(int indents = 0) const;
 
-        // Children owned here. If 'wholeIXSoln' is false, then 'tree'
-        // can be used to tag an isomorphic match expression. If 'wholeIXSoln'
-        // is true, then 'tree' is used to store the relevant IndexEntry.
+        // Children owned here.
         std::vector<PlanCacheIndexTree*> children;
 
         // Owned here.
@@ -146,7 +131,11 @@ namespace mongo {
      * QuerySolution.
      */
     struct SolutionCacheData {
-        SolutionCacheData() : tree(NULL), wholeIXSoln(false), wholeIXSolnDir(1) { }
+        SolutionCacheData() :
+            tree(NULL),
+            solnType(USE_INDEX_TAGS_SOLN),
+            wholeIXSolnDir(1) {
+        }
 
         // Make a deep copy.
         SolutionCacheData* clone() const;
@@ -154,45 +143,67 @@ namespace mongo {
         // For debugging.
         std::string toString() const;
 
-        // Owned here
+        // Owned here. If 'wholeIXSoln' is false, then 'tree'
+        // can be used to tag an isomorphic match expression. If 'wholeIXSoln'
+        // is true, then 'tree' is used to store the relevant IndexEntry.
+        // If 'collscanSoln' is true, then 'tree' should be NULL.
         scoped_ptr<PlanCacheIndexTree> tree;
 
-        // If true, indicates that the plan should
-        // use the index as a proxy for a collection
-        // scan (e.g. using index to provide sort).
-        bool wholeIXSoln;
+        enum SolutionType {
+            // Indicates that the plan should use
+            // the index as a proxy for a collection
+            // scan (e.g. using index to provide sort).
+            WHOLE_IXSCAN_SOLN,
+
+            // The cached plan is a collection scan.
+            COLLSCAN_SOLN,
+
+            // Build the solution by using 'tree'
+            // to tag the match expression.
+            USE_INDEX_TAGS_SOLN
+        } solnType;
 
         // The direction of the index scan used as
-        // a proxy for a collection scan.
+        // a proxy for a collection scan. Used only
+        // for WHOLE_IXSCAN_SOLN.
         int wholeIXSolnDir;
     };
 
-    /**
-     * We don't want to cache every possible query. This function
-     * encapsulates the criteria for what makes a canonical query
-     * suitable for lookup/inclusion in the cache.
-     */
-    bool shouldCacheQuery(const CanonicalQuery& query);
-
-    /**
-     * Normalizes canonical query for caching.
-     * Current sorts nodes of internal match expression.
-     * Not to be confused with internal function CanonicalQuery::normalizeTree()
-     */
-    void normalizeQueryForCache(CanonicalQuery* queryOut);
-
-    /**
-     * Generates a key for a normalized (for caching) canonical query
-     * from the match expression and sort order.
-     */
-    PlanCacheKey getPlanCacheKey(const CanonicalQuery& query);
+    class PlanCacheEntry;
 
     /**
      * Information returned from a get(...) query.
      */
-    struct CachedSolution {
+    class CachedSolution {
+    private:
+        MONGO_DISALLOW_COPYING(CachedSolution);
+    public:
+        CachedSolution(const PlanCacheKey& key, const PlanCacheEntry& entry);
+        ~CachedSolution();
+
+        /**
+         * Resolves index of winning solution.
+         * Takes into account pinned and shunned plans.
+         * Pinned plans take precendence over shunned plans.
+         * If a plan is both pinned and shunned, it will be the winning plan.
+         * The reason we provide the index into plannerData is to support the
+         * notion of a backup plan in the multi plan runner. The cache solution
+         * runner could go to the next solution after the winner index.
+         */
+        size_t getWinnerIndex() const;
+
         // Owned here.
-        boost::scoped_ptr<SolutionCacheData> plannerData;
+        std::vector<SolutionCacheData*> plannerData;
+
+        // Pin information
+        bool pinned;
+
+        // Index of pinned plan in plannerData.
+        // Valid if pinned is true.
+        size_t pinnedIndex;
+
+        // Indexes of shunned plans.
+        std::set<size_t> shunnedIndexes;
 
         // Key used to provide feedback on the entry.
         PlanCacheKey key;
@@ -200,13 +211,12 @@ namespace mongo {
         // For debugging.
         std::string toString() const;
 
-        // XXX: remove when we have a real CachedSolution
-        size_t numPlans;
+        // We are extracting just enough information from the canonical
+        // query. We could clone the canonical query but the following
+        // items are all that is displayed to the user.
         BSONObj query;
         BSONObj sort;
         BSONObj projection;
-
-        // XXX: no copying
     };
 
     /**
@@ -220,11 +230,11 @@ namespace mongo {
 
         /**
          * Create a new PlanCacheEntry.
-         * Grabs any planner-specific data required from the solution.
+         * Grabs any planner-specific data required from the solutions.
          * Takes ownership of the PlanRankingDecision that placed the plan in the cache.
          * XXX: what else should this take?
          */
-        PlanCacheEntry(const QuerySolution& s,
+        PlanCacheEntry(const std::vector<QuerySolution*>& solutions,
                    PlanRankingDecision* d);
 
         ~PlanCacheEntry();
@@ -232,10 +242,10 @@ namespace mongo {
         // For debugging.
         std::string toString() const;
 
-        // Data provided to the planner to allow it to recreate the solution this entry
-        // represents. The SolutionCacheData is fully owned here, so in order to return
+        // Data provided to the planner to allow it to recreate the solutions this entry
+        // represents. Each SolutionCacheData is fully owned here, so in order to return
         // it from the cache a deep copy is made and returned inside CachedSolution.
-        boost::scoped_ptr<SolutionCacheData> plannerData;
+        std::vector<SolutionCacheData*> plannerData;
 
         // Why the best solution was picked.
         // TODO: Do we want to store other information like the other plans considered?
@@ -248,8 +258,12 @@ namespace mongo {
         // Is this pinned in the cache?  If so, we will never remove it as a result of feedback.
         bool pinned;
 
-        // XXX: for test only. Remove when plan cache entries are implemented.
-        size_t numPlans;
+        // Index of pinned plan in plannerData.
+        // Valid if pinned is true.
+        size_t pinnedIndex;
+
+        // Indexes of shunned plans.
+        std::set<size_t> shunnedIndexes;
 
         // XXX: Replace with copy of canonical query?
         BSONObj query;
@@ -262,20 +276,46 @@ namespace mongo {
      * mapping, the cache contains information on why that mapping was made and statistics on the
      * cache entry's actual performance on subsequent runs.
      *
-     * XXX: lock in here!  this can be called by many threads at the same time since the only above-this
-     * locking required is a read lock on the ns.
      */
     class PlanCache {
     private:
         MONGO_DISALLOW_COPYING(PlanCache);
     public:
+        /**
+         * Flush cache when the number of write operations since last
+         * clear() reaches this limit.
+         */
+        static const int kPlanCacheMaxWriteOperations;
+
+        /**
+         * We don't want to cache every possible query. This function
+         * encapsulates the criteria for what makes a canonical query
+         * suitable for lookup/inclusion in the cache.
+         */
+        static bool shouldCacheQuery(const CanonicalQuery& query);
+
+        /**
+         * Normalizes canonical query for caching.
+         * Current sorts nodes of internal match expression.
+         * Not to be confused with internal function CanonicalQuery::normalizeTree()
+         */
+        static void normalizeQueryForCache(CanonicalQuery* queryOut);
+
+        /**
+         * Generates a key for a normalized (for caching) canonical query
+         * from the match expression and sort order.
+         */
+        static PlanCacheKey getPlanCacheKey(const CanonicalQuery& query);
+
         PlanCache() { }
 
         ~PlanCache();
 
         /**
-         * Record 'solution' as the best plan for 'query' which was picked for reasons detailed in
-         * 'why'.
+         * Record solutions for query. Best plan is first element in list.
+         * Each query in the cache will have more than 1 plan because we only
+         * add queries which are considered by the multi plan runner (which happens
+         * only when the query planner generates multiple candidate plans).
          *
          * Takes ownership of 'why'.
          *
@@ -283,7 +323,7 @@ namespace mongo {
          * If the mapping already existed or some other error occurred, returns another Status.
          */
         Status add(const CanonicalQuery& query,
-                   const QuerySolution& soln,
+                   const std::vector<QuerySolution*>& solns,
                    PlanRankingDecision* why);
 
         /**
@@ -335,7 +375,7 @@ namespace mongo {
 
         /**
          * Traverses expression tree post-order.
-         * Sorts children at each non-leaf node by (MatchType, path())
+         * Sorts children at each non-leaf node by (MatchType, path(), cacheKey)
          */
         static void sortTree(MatchExpression* tree);
 
@@ -365,6 +405,12 @@ namespace mongo {
          */
         Status shunPlan(const PlanCacheKey& key, const PlanID& plan);
 
+        /**
+         *  You must notify the cache if you are doing writes, as query plan utility will change.
+         *  Cache is flushed after every 1000 notifications.
+         */
+        void notifyOfWriteOp();
+
     private:
 
         /**
@@ -380,6 +426,12 @@ namespace mongo {
          * Protects _cache.
          */
         mutable boost::mutex _cacheMutex;
+
+        /**
+         * Counter for write notifications since initialization or last clear() invocation.
+         * Starts at 0.
+         */
+        AtomicInt32 _writeOperations;
     };
 
 }  // namespace mongo

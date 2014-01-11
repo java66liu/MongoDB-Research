@@ -272,12 +272,28 @@ namespace mongo {
             help << "http://dochub.mongodb.org/core/databaseprofiler";
         }
         virtual LockType locktype() const { return WRITE; }
-        virtual void addRequiredPrivileges(const std::string& dbname,
-                                           const BSONObj& cmdObj,
-                                           std::vector<Privilege>* out) {
-            ActionSet actions;
-            actions.addAction(ActionType::enableProfiler);
-            out->push_back(Privilege(ResourcePattern::forDatabaseName(dbname), actions));
+        virtual Status checkAuthForCommand(ClientBasic* client,
+                                           const std::string& dbname,
+                                           const BSONObj& cmdObj) {
+            AuthorizationSession* authzSession = client->getAuthorizationSession();
+
+            if (cmdObj.firstElement().numberInt() == -1 && !cmdObj.hasField("slowms")) {
+                // If you just want to get the current profiling level you can do so with just
+                // read access to system.profile, even if you can't change the profiling level.
+                if (authzSession->isAuthorizedForActionsOnResource(
+                        ResourcePattern::forExactNamespace(NamespaceString(dbname,
+                                                                           "system.profile")),
+                        ActionType::find)) {
+                    return Status::OK();
+                }
+            }
+
+            if (authzSession->isAuthorizedForActionsOnResource(
+                    ResourcePattern::forDatabaseName(dbname), ActionType::enableProfiler)) {
+                return Status::OK();
+            }
+
+            return Status(ErrorCodes::Unauthorized, "unauthorized");
         }
         CmdProfile() : Command("profile") {}
         bool run(const string& dbname, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
@@ -396,8 +412,10 @@ namespace mongo {
 
             Collection* coll = cc().database()->getCollection( nsToDrop );
             // If collection does not exist, short circuit and return.
-            if ( !coll )
-                return true;
+            if ( !coll ) {
+                errmsg = "ns not found";
+                return false;
+            }
 
             int numIndexes = coll->getIndexCatalog()->numIndexesTotal();
 
@@ -456,7 +474,7 @@ namespace mongo {
             string ns = parseNs(dbname, cmdObj);
             string err;
             int errCode;
-            long long n = runCount(ns.c_str(), cmdObj, err, errCode);
+            long long n = runCount(ns, cmdObj, err, errCode);
             long long nn = n;
             bool ok = true;
             if ( n == -1 ) {
@@ -896,7 +914,7 @@ namespace mongo {
                 min = Helpers::toKeyFormat( kp.extendRangeBound( min, false ) );
                 max = Helpers::toKeyFormat( kp.extendRangeBound( max, false ) );
 
-                runner.reset(InternalPlanner::indexScan(idx, min, max, false));
+                runner.reset(InternalPlanner::indexScan(collection, idx, min, max, false));
             }
 
             long long avgObjSize = collection->details()->dataSize() / collection->numRecords();
@@ -1128,15 +1146,13 @@ namespace mongo {
                         continue;
                     }
 
-                    int idxNo = nsd->findIndexByKeyPattern( keyPattern );
-                    if( idxNo < 0 ){
+                    IndexDescriptor* idx = coll->getIndexCatalog()->findIndexByKeyPattern( keyPattern );
+                    if ( idx == NULL ) {
                         errmsg = str::stream() << "cannot find index " << keyPattern
                                                << " for ns " << ns;
                         ok = false;
                         continue;
                     }
-
-                    IndexDescriptor* idx = coll->getIndexCatalog()->getDescriptor( idxNo );
                     BSONElement oldExpireSecs = idx->infoObj().getField("expireAfterSeconds");
                     if( oldExpireSecs.eoo() ){
                         errmsg = "no expireAfterSeconds field to update";
@@ -1152,7 +1168,7 @@ namespace mongo {
                     if ( oldExpireSecs != newExpireSecs ) {
                         // change expireAfterSeconds
                         result.appendAs( oldExpireSecs, "expireAfterSeconds_old" );
-                        nsd->updateTTLIndex( idxNo , newExpireSecs );
+                        coll->getIndexCatalog()->updateTTLSetting( idx, newExpireSecs.numberLong() );
                         result.appendAs( newExpireSecs , "expireAfterSeconds_new" );
                     }
                 }

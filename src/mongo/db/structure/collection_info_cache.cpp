@@ -74,11 +74,15 @@ namespace mongo {
     }
 
     void CollectionInfoCache::notifyOfWriteOp() {
-        // TODO: hook up w/new cache when impl
+        if (NULL != _planCache.get()) {
+            _planCache->notifyOfWriteOp();
+        }
     }
 
     void CollectionInfoCache::clearQueryCache() {
-        // TODO: hook up w/new cache when impl
+        if (NULL != _planCache.get()) {
+            _planCache->clear();
+        }
     }
 
     PlanCache* CollectionInfoCache::getPlanCache() const {

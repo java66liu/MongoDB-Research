@@ -61,6 +61,35 @@ namespace mongo {
         virtual size_t documentSize() const = 0;
     };
 
+    struct CompactOptions {
+
+        CompactOptions() {
+            paddingMode = NONE;
+            validateDocuments = true;
+            paddingFactor = 1;
+            paddingBytes = 0;
+        }
+
+        // padding
+        enum PaddingMode {
+            PRESERVE, NONE, MANUAL
+        } paddingMode;
+
+        // only used if _paddingMode == MANUAL
+        double paddingFactor; // what to multiple document size by
+        int paddingBytes; // what to add to ducment size after multiplication
+        unsigned computeRecordSize( unsigned recordSize ) const {
+            recordSize = static_cast<unsigned>( paddingFactor * recordSize );
+            recordSize += paddingBytes;
+            return recordSize;
+        }
+
+        // other
+        bool validateDocuments;
+
+        std::string toString() const;
+    };
+
     /**
      * this is NOT safe through a yield right now
      * not sure if it will be, or what yet
@@ -91,9 +120,20 @@ namespace mongo {
         BSONObj docFor( const DiskLoc& loc );
 
         // ---- things that should move to a CollectionAccessMethod like thing
-
+        /**
+         * canonical to get all would be
+         * getIterator( DiskLoc(), false, CollectionScanParams::FORWARD )
+         */
         CollectionIterator* getIterator( const DiskLoc& start, bool tailable,
                                          const CollectionScanParams::Direction& dir) const;
+
+
+        /**
+         * does a table scan to do a count
+         * this should only be used at a very low level
+         * does no yielding, indexes, etc...
+         */
+        int64_t countTableScan( const MatchExpression* expression );
 
         void deleteDocument( const DiskLoc& loc,
                              bool cappedOK = false,

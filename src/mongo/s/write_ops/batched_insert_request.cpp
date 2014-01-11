@@ -99,31 +99,48 @@ namespace mongo {
         std::string dummy;
         if (!errMsg) errMsg = &dummy;
 
-        FieldParser::FieldState fieldState;
-        fieldState = FieldParser::extract(source, collName, &_collName, errMsg);
-        if (fieldState == FieldParser::FIELD_INVALID) return false;
-        _isCollNameSet = fieldState == FieldParser::FIELD_SET;
+        BSONObjIterator sourceIt(source);
 
-        fieldState = FieldParser::extract(source, documents, &_documents, errMsg);
-        if (fieldState == FieldParser::FIELD_INVALID) return false;
-        _isDocumentsSet = fieldState == FieldParser::FIELD_SET;
+        while ( sourceIt.more() ) {
 
-        fieldState = FieldParser::extract(source, writeConcern, &_writeConcern, errMsg);
-        if (fieldState == FieldParser::FIELD_INVALID) return false;
-        _isWriteConcernSet = fieldState == FieldParser::FIELD_SET;
+            BSONElement sourceEl = sourceIt.next();
 
-        fieldState = FieldParser::extract(source, ordered, &_ordered, errMsg);
-        if (fieldState == FieldParser::FIELD_INVALID) return false;
-        _isOrderedSet = fieldState == FieldParser::FIELD_SET;
+            if ( collName() == sourceEl.fieldName() ) {
+                FieldParser::FieldState fieldState =
+                    FieldParser::extract( sourceEl, collName, &_collName, errMsg );
+                if (fieldState == FieldParser::FIELD_INVALID) return false;
+                _isCollNameSet = fieldState == FieldParser::FIELD_SET;
+            }
+            else if ( documents() == sourceEl.fieldName() ) {
+                FieldParser::FieldState fieldState =
+                    FieldParser::extract( sourceEl, documents, &_documents, errMsg );
+                if ( fieldState == FieldParser::FIELD_INVALID ) return false;
+                _isDocumentsSet = fieldState == FieldParser::FIELD_SET;
+            }
+            else if ( writeConcern() == sourceEl.fieldName() ) {
+                FieldParser::FieldState fieldState =
+                    FieldParser::extract(sourceEl, writeConcern, &_writeConcern, errMsg);
+                if (fieldState == FieldParser::FIELD_INVALID) return false;
+                _isWriteConcernSet = fieldState == FieldParser::FIELD_SET;
+            }
+            else if ( ordered() == sourceEl.fieldName() ) {
+                FieldParser::FieldState fieldState =
+                    FieldParser::extract(sourceEl, ordered, &_ordered, errMsg);
+                if (fieldState == FieldParser::FIELD_INVALID) return false;
+                _isOrderedSet = fieldState == FieldParser::FIELD_SET;
+            }
+            else if ( metadata() == sourceEl.fieldName() ) {
+                BSONObj metadataObj;
+                FieldParser::FieldState fieldState =
+                    FieldParser::extract(sourceEl, metadata, &metadataObj, errMsg);
+                if (fieldState == FieldParser::FIELD_INVALID) return false;
 
-        BSONObj metadataObj;
-        fieldState = FieldParser::extract(source, metadata, &metadataObj, errMsg);
-        if (fieldState == FieldParser::FIELD_INVALID) return false;
-
-        if (!metadataObj.isEmpty()) {
-            _metadata.reset(new BatchedRequestMetadata());
-            if (!_metadata->parseBSON(metadataObj, errMsg)) {
-                return false;
+                if (!metadataObj.isEmpty()) {
+                    _metadata.reset(new BatchedRequestMetadata());
+                    if (!_metadata->parseBSON(metadataObj, errMsg)) {
+                        return false;
+                    }
+                }
             }
         }
 
@@ -193,15 +210,6 @@ namespace mongo {
         return _collName;
     }
 
-    void BatchedInsertRequest::setDocuments(const std::vector<BSONObj>& documents) {
-        for (std::vector<BSONObj>::const_iterator it = documents.begin();
-             it != documents.end();
-             ++it) {
-            addToDocuments((*it).getOwned());
-        }
-        _isDocumentsSet = documents.size() > 0;
-    }
-
     void BatchedInsertRequest::addToDocuments(const BSONObj& documents) {
         _documents.push_back(documents);
         _isDocumentsSet = true;
@@ -221,11 +229,6 @@ namespace mongo {
     }
 
     const std::vector<BSONObj>& BatchedInsertRequest::getDocuments() const {
-        dassert(_isDocumentsSet);
-        return _documents;
-    }
-
-    std::vector<BSONObj>& BatchedInsertRequest::getDocuments() {
         dassert(_isDocumentsSet);
         return _documents;
     }
@@ -278,6 +281,14 @@ namespace mongo {
 
     void BatchedInsertRequest::setMetadata(BatchedRequestMetadata* metadata) {
         _metadata.reset(metadata);
+    }
+
+    void BatchedInsertRequest::unsetMetadata() {
+        _metadata.reset();
+    }
+
+    bool BatchedInsertRequest::isMetadataSet() const {
+        return _metadata.get();
     }
 
     BatchedRequestMetadata* BatchedInsertRequest::getMetadata() const {

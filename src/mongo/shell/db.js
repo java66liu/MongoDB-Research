@@ -1000,14 +1000,6 @@ DB.prototype._createUser = function(userObj, writeConcern) {
         return false;
     }
 
-    // We can't detect replica set shards via mongos, so we'll sometimes get this error
-    // In this case though, we've already checked the local error before returning norepl, so
-    // the user has been written and we're happy
-    if (res.errmsg == "norepl" || res.errmsg == "noreplset") {
-        // nothing we can do
-        return true;
-    }
-
     if (res.errmsg == "timeout") {
         throw Error("timed out while waiting for user authentication to replicate - " +
                     "database will not be fully secured until replication finishes");
@@ -1114,11 +1106,6 @@ DB.prototype.updateUser = function(name, updateObject, writeConcern) {
         return;
     }
 
-    if (res.errmsg == "noreplset") {
-        // nothing we can do
-        return;
-    }
-
     throw Error("Updating user failed: " + res.errmsg);
 };
 
@@ -1201,7 +1188,7 @@ DB.prototype._authOrThrow = function () {
     else if (arguments.length == 1) {
         if (typeof(arguments[0]) != "object")
             throw Error("Single-argument form of auth expects a parameter object");
-        params = arguments[0];
+        params = Object.extend({}, arguments[0]);
     }
     else {
         throw Error(

@@ -1195,14 +1195,59 @@ namespace {
     }
     */
 
+    // SERVER-1205
     TEST_F(QueryPlannerTest, InWithSort) {
         addIndex(BSON("a" << 1 << "b" << 1));
-        runQuerySortProjSkipLimit(fromjson("{a: {$in: [3, 1, 8]}}"),
+        runQuerySortProjSkipLimit(fromjson("{a: {$in: [1, 2]}}"),
                                   BSON("b" << 1), BSONObj(), 0, 1);
 
         assertSolutionExists("{sort: {pattern: {b: 1}, limit: 1, "
                              "node: {cscan: {dir: 1}}}}");
-        // TODO SERVER-1205 there should be a mergeSort solution
+        assertSolutionExists("{fetch: {node: {mergeSort: {nodes: "
+                                "[{ixscan: {pattern: {a: 1, b: 1}}}, {ixscan: {pattern: {a: 1, b: 1}}}]}}}}");
+    }
+
+    // SERVER-1205
+    TEST_F(QueryPlannerTest, InWithoutSort) {
+        addIndex(BSON("a" << 1 << "b" << 1));
+        // No sort means we don't bother to blow up the bounds.
+        runQuerySortProjSkipLimit(fromjson("{a: {$in: [1, 2]}}"), BSONObj(), BSONObj(), 0, 1);
+
+        assertSolutionExists("{cscan: {dir: 1}}");
+        assertSolutionExists("{fetch: {node: {ixscan: {pattern: {a: 1, b: 1}}}}}");
+    }
+
+    // SERVER-1205
+    TEST_F(QueryPlannerTest, ManyInWithSort) {
+        addIndex(BSON("a" << 1 << "b" << 1 << "c" << 1 << "d" << 1));
+        runQuerySortProjSkipLimit(fromjson("{a: {$in: [1, 2]}, b:{$in:[1,2]}, c:{$in:[1,2]}}"),
+                                  BSON("d" << 1), BSONObj(), 0, 1);
+
+        assertSolutionExists("{sort: {pattern: {d: 1}, limit: 1, "
+                             "node: {cscan: {dir: 1}}}}");
+        assertSolutionExists("{fetch: {node: {mergeSort: {nodes: "
+                                "[{ixscan: {pattern: {a: 1, b: 1, c:1, d:1}}},"
+                                 "{ixscan: {pattern: {a: 1, b: 1, c:1, d:1}}},"
+                                 "{ixscan: {pattern: {a: 1, b: 1, c:1, d:1}}},"
+                                 "{ixscan: {pattern: {a: 1, b: 1, c:1, d:1}}},"
+                                 "{ixscan: {pattern: {a: 1, b: 1, c:1, d:1}}},"
+                                  "{ixscan: {pattern: {a: 1, b: 1, c:1, d:1}}}]}}}}");
+    }
+
+    // SERVER-1205
+    TEST_F(QueryPlannerTest, TooManyToExplode) {
+        addIndex(BSON("a" << 1 << "b" << 1 << "c" << 1 << "d" << 1));
+        runQuerySortProjSkipLimit(fromjson("{a: {$in: [1,2,3,4,5,6]},"
+                                            "b:{$in:[1,2,3,4,5,6,7,8]},"
+                                            "c:{$in:[1,2,3,4,5,6,7,8]}}"),
+                                  BSON("d" << 1), BSONObj(), 0, 1);
+
+        // We cap the # of ixscans we're willing to create.
+        assertNumSolutions(2);
+        assertSolutionExists("{sort: {pattern: {d: 1}, limit: 1, "
+                             "node: {cscan: {dir: 1}}}}");
+        assertSolutionExists("{sort: {pattern: {d: 1}, limit: 1, node: "
+                             "{fetch: {node: {ixscan: {pattern: {a: 1, b: 1, c:1, d:1}}}}}}}");
     }
 
     //
@@ -1559,6 +1604,28 @@ namespace {
                                 "{ixscan: {filter: {$and:[{a:/0/},{a:/1/},{a:/2/}]}, pattern: {a: 1}}}}}");
     }
 
+    TEST_F(QueryPlannerTest, NonPrefixRegexMultikey) {
+        // true means multikey
+        addIndex(BSON("a" << 1), true);
+        runQuery(fromjson("{a: /foo/}"));
+
+        ASSERT_EQUALS(getNumSolutions(), 2U);
+        assertSolutionExists("{cscan: {filter: {a: /foo/}, dir: 1}}");
+        assertSolutionExists("{fetch: {filter: {a: /foo/}, node: {ixscan: "
+                                "{pattern: {a: 1}, filter: null}}}}");
+    }
+
+    TEST_F(QueryPlannerTest, ThreeRegexSameFieldMultikey) {
+        // true means multikey
+        addIndex(BSON("a" << 1), true);
+        runQuery(fromjson("{$and: [{a: /0/}, {a: /1/}, {a: /2/}]}"));
+
+        ASSERT_EQUALS(getNumSolutions(), 2U);
+        assertSolutionExists("{cscan: {filter: {$and:[{a:/0/},{a:/1/},{a:/2/}]}, dir: 1}}");
+        assertSolutionExists("{fetch: {filter: {$and:[{a:/0/},{a:/1/},{a:/2/}]}, node: {ixscan: "
+                                "{pattern: {a: 1}, filter: null}}}}");
+    }
+
     //
     // Negation
     //
@@ -1773,6 +1840,39 @@ namespace {
                                 " bounds: {a: [[2,2,true,true], [3,3,true,true]]}}}}}");
         assertSolutionExists("{fetch: {filter: {$or: [{a: 2}, {a: 3}]}, node: {ixscan: "
                                 "{pattern: {a: 1}, filter: null, bounds: {a: [[1,1,true,true]]}}}}}");
+    }
+
+    TEST_F(QueryPlannerTest, IndexBoundsIndexedSort) {
+        addIndex(BSON("a" << 1));
+        runQuerySortProj(fromjson("{$or: [{a: 1}, {a: 2}]}"), BSON("a" << 1), BSONObj());
+
+        assertNumSolutions(2U);
+        assertSolutionExists("{sort: {pattern: {a:1}, limit: 0, node: "
+                                "{cscan: {filter: {$or:[{a:1},{a:2}]}, dir: 1}}}}");
+        assertSolutionExists("{fetch: {filter: null, node: {ixscan: {filter: null, "
+                                "pattern: {a:1}, bounds: {a: [[1,1,true,true], [2,2,true,true]]}}}}}");
+    }
+
+    TEST_F(QueryPlannerTest, IndexBoundsUnindexedSort) {
+        addIndex(BSON("a" << 1));
+        runQuerySortProj(fromjson("{$or: [{a: 1}, {a: 2}]}"), BSON("b" << 1), BSONObj());
+
+        assertNumSolutions(2U);
+        assertSolutionExists("{sort: {pattern: {b:1}, limit: 0, node: "
+                                "{cscan: {filter: {$or:[{a:1},{a:2}]}, dir: 1}}}}");
+        assertSolutionExists("{sort: {pattern: {b:1}, limit: 0, node: {fetch: "
+                                "{filter: null, node: {ixscan: {filter: null, "
+                                "pattern: {a:1}, bounds: {a: [[1,1,true,true], [2,2,true,true]]}}}}}}}");
+    }
+
+    TEST_F(QueryPlannerTest, IndexBoundsUnindexedSortHint) {
+        addIndex(BSON("a" << 1));
+        runQuerySortHint(fromjson("{$or: [{a: 1}, {a: 2}]}"), BSON("b" << 1), BSON("a" << 1));
+
+        assertNumSolutions(1U);
+        assertSolutionExists("{sort: {pattern: {b:1}, limit: 0, node: {fetch: "
+                                "{filter: null, node: {ixscan: {filter: null, "
+                                "pattern: {a:1}, bounds: {a: [[1,1,true,true], [2,2,true,true]]}}}}}}}");
     }
 
     //

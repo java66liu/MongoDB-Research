@@ -537,7 +537,6 @@ serverOnlyFiles = [ "db/curop.cpp",
                     "db/introspect.cpp",
                     "db/structure/btree/btree.cpp",
                     "db/structure/btree/btree_stats.cpp",
-                    "db/structure/btree/state.cpp",
                     "db/clientcursor.cpp",
                     "db/tests.cpp",
                     "db/range_deleter_db_env.cpp",
@@ -568,7 +567,7 @@ serverOnlyFiles = [ "db/curop.cpp",
                     "db/index_legacy.cpp",
                     "db/index/2d_access_method.cpp",
                     "db/index/btree_access_method.cpp",
-                    "db/index/btree_based_builder.cpp",
+                    "db/index/btree_based_access_method.cpp",
                     "db/index/btree_index_cursor.cpp",
                     "db/index/btree_interface.cpp",
                     "db/index/fts_access_method.cpp",
@@ -585,6 +584,7 @@ serverOnlyFiles = [ "db/curop.cpp",
                     "db/client.cpp",
                     "db/database.cpp",
                     "db/catalog/index_catalog.cpp",
+                    "db/catalog/index_catalog_entry.cpp",
                     "db/catalog/index_create.cpp",
                     "db/structure/collection.cpp",
                     "db/structure/collection_info_cache.cpp",
@@ -619,6 +619,8 @@ serverOnlyFiles = [ "db/curop.cpp",
                     # most commands are only for mongod
                     "db/stats/top.cpp",
                     "db/commands/apply_ops.cpp",
+                    "db/commands/compact.cpp",
+                    "db/commands/auth_schema_upgrade_d.cpp",
                     "db/commands/dbhash.cpp",
                     "db/commands/merge_chunks_cmd.cpp",
                     "db/commands/cleanup_orphaned_cmd.cpp",
@@ -633,6 +635,7 @@ serverOnlyFiles = [ "db/curop.cpp",
                     "db/commands/group.cpp",
                     "db/commands/index_stats.cpp",
                     "db/commands/mr.cpp",
+                    "db/commands/oplog_note.cpp",
                     "db/commands/pipeline_command.cpp",
                     "db/commands/plan_cache_commands.cpp",
                     "db/commands/rename_collection.cpp",
@@ -675,7 +678,7 @@ serverOnlyFiles += mmapFiles
 
 serverOnlyFiles += [ "db/stats/snapshots.cpp" ]
 
-env.Library('coreshard', ['client/distlock.cpp',
+env.Library('coreshard', ['s/distlock.cpp',
                           's/config.cpp',
                           's/grid.cpp',
                           's/chunk.cpp',
@@ -689,10 +692,9 @@ env.Library('coreshard', ['client/distlock.cpp',
 mongosLibraryFiles = [
     "s/interrupt_status_mongos.cpp",
     "s/strategy.cpp",
-    "s/strategy_shard.cpp",
-    "s/strategy_single.cpp",
     "s/commands_admin.cpp",
     "s/commands_public.cpp",
+    "s/commands/auth_schema_upgrade_s.cpp",
     "s/commands/cluster_merge_chunks_cmd.cpp",
     "s/commands/cluster_write_cmd.cpp",
     "s/request.cpp",
@@ -714,6 +716,7 @@ env.Library( "mongoscore",
                       'db/query/lite_parsed_query',
                       's/cluster_write_ops',
                       's/cluster_write_op_conversion',
+                      's/upgrade',
                      ] )
 
 env.CppUnitTest( "balancer_policy_test" , [ "s/balancer_policy_tests.cpp" ] ,
@@ -776,7 +779,7 @@ serverOnlyFiles += [ "s/d_logic.cpp",
                      "s/d_state.cpp",
                      "s/d_split.cpp",
                      "s/d_merge.cpp",
-                     "client/distlock_test.cpp" ]
+                     "s/distlock_test.cpp" ]
 
 env.Library("defaultversion", "s/default_version.cpp")
 
@@ -1064,7 +1067,7 @@ if darwin or env["_HAVEPCAP"]:
 env.JSHeader("shell/mongo.cpp",
              ["shell/assert.js", "shell/types.js", "shell/utils.js", "shell/utils_sh.js",
               "shell/db.js", "shell/mongo.js", "shell/mr.js", "shell/query.js",
-              "shell/collection.js", "shell/writes.js"])
+              "shell/collection.js", "shell/batch_api.js"])
 
 # if you add a file here, you need to add it in shell/shell_utils.cpp and shell/createCPPfromJavaScriptFiles.js as well
 env.JSHeader("shell/mongo-server.cpp",

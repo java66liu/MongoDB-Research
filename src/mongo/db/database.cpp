@@ -63,10 +63,8 @@ namespace mongo {
         verify( Lock::isW() );
         _magic = 0;
 
-        for ( CollectionMap::iterator i = _collections.begin(); i != _collections.end(); ++i ) {
+        for ( CollectionMap::const_iterator i = _collections.begin(); i != _collections.end(); ++i )
             delete i->second;
-        }
-        _collections.clear();
     }
 
     Status Database::validateDBName( const StringData& dbname ) {
@@ -334,7 +332,7 @@ namespace mongo {
             // check all index collection entries are gone
             string nstocheck = fullns.toString() + ".$";
             scoped_lock lk( _collectionLock );
-            for ( CollectionMap::iterator i = _collections.begin();
+            for ( CollectionMap::const_iterator i = _collections.begin();
                   i != _collections.end();
                   ++i ) {
                 string temp = i->first;
@@ -356,7 +354,7 @@ namespace mongo {
 
     void Database::_clearCollectionCache_inlock( const StringData& fullns ) {
         verify( _name == nsToDatabaseSubstring( fullns ) );
-        CollectionMap::iterator it = _collections.find( fullns.toString() );
+        CollectionMap::const_iterator it = _collections.find( fullns.toString() );
         if ( it == _collections.end() )
             return;
 
@@ -369,9 +367,7 @@ namespace mongo {
 
         scoped_lock lk( _collectionLock );
 
-        string myns = ns.toString();
-
-        CollectionMap::const_iterator it = _collections.find( myns );
+        CollectionMap::const_iterator it = _collections.find( ns );
         if ( it != _collections.end() ) {
             if ( it->second ) {
                 DEV {
@@ -393,7 +389,7 @@ namespace mongo {
         }
 
         Collection* c = new Collection( ns, details, this );
-        _collections[myns] = c;
+        _collections[ns] = c;
         return c;
     }
 
@@ -436,7 +432,7 @@ namespace mongo {
             if ( !newIndexSpecLoc.isOK() )
                 return newIndexSpecLoc.getStatus();
 
-            int indexI = details->findIndexByName( oldIndexSpec.getStringField( "name" ) );
+            int indexI = details->_catalogFindIndexByName( oldIndexSpec.getStringField( "name" ) );
             IndexDetails &indexDetails = details->idx(indexI);
             string oldIndexNs = indexDetails.indexNamespace();
             indexDetails.info = newIndexSpecLoc.getValue();
@@ -635,7 +631,8 @@ namespace mongo {
     Status Database::_dropNS( const StringData& ns ) {
         NamespaceDetails* d = _namespaceIndex.details( ns );
         if ( !d )
-            return Status( ErrorCodes::InternalError, str::stream() << "ns not found: " << ns );
+            return Status( ErrorCodes::NamespaceNotFound,
+                           str::stream() << "ns not found: " << ns );
 
         BackgroundOperation::assertNoBgOpInProgForNs( ns );
 

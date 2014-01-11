@@ -156,7 +156,7 @@ namespace mongo {
             isn->maxScan = query.getParsed().getMaxScan();
             isn->addKeyMetadata = query.getParsed().returnKey();
 
-            IndexBoundsBuilder::translate(expr, index.keyPattern.firstElement(),
+            IndexBoundsBuilder::translate(expr, index.keyPattern.firstElement(), index,
                                           &isn->bounds.fields[0], tightnessOut);
 
             // QLOG() << "bounds are " << isn->bounds.toString() << " exact " << *exact << endl;
@@ -212,15 +212,15 @@ namespace mongo {
         OrderedIntervalList* oil = &boundsToFillOut->fields[pos];
 
         if (boundsToFillOut->fields[pos].name.empty()) {
-            IndexBoundsBuilder::translate(expr, keyElt, oil, tightnessOut);
+            IndexBoundsBuilder::translate(expr, keyElt, index, oil, tightnessOut);
         }
         else {
             if (MatchExpression::AND == mergeType) {
-                IndexBoundsBuilder::translateAndIntersect(expr, keyElt, oil, tightnessOut);
+                IndexBoundsBuilder::translateAndIntersect(expr, keyElt, index, oil, tightnessOut);
             }
             else {
                 verify(MatchExpression::OR == mergeType);
-                IndexBoundsBuilder::translateAndUnion(expr, keyElt, oil, tightnessOut);
+                IndexBoundsBuilder::translateAndUnion(expr, keyElt, index, oil, tightnessOut);
             }
         }
     }
@@ -508,11 +508,19 @@ namespace mongo {
                     delete child;
                     // Don't increment curChild.
                 }
-                else if (tightness == IndexBoundsBuilder::INEXACT_COVERED) {
+                else if (tightness == IndexBoundsBuilder::INEXACT_COVERED
+                         && !indices[currentIndexNumber].multikey) {
                     // The bounds are not exact, but the information needed to
                     // evaluate the predicate is in the index key. Remove the
                     // MatchExpression from its parent and attach it to the filter
                     // of the index scan we're building.
+                    //
+                    // We can only use this optimization if the index is NOT multikey.
+                    // Suppose that we had the multikey index {x: 1} and a document
+                    // {x: ["a", "b"]}. Now if we query for {x: /b/} the filter might
+                    // ever only be applied to the index key "a". We'd incorrectly
+                    // conclude that the document does not match the query :( so we
+                    // gotta stick to non-multikey indices.
                     root->getChildVector()->erase(root->getChildVector()->begin()
                                                   + curChild);
 
@@ -777,9 +785,6 @@ namespace mongo {
                 QuerySolutionNode* soln = makeLeafNode(query, indices[tag->index], root,
                                                        &tightness);
                 verify(NULL != soln);
-                stringstream ss;
-                soln->appendToString(&ss, 0);
-                // QLOG() << "about to finish leaf node, soln " << ss.str() << endl;
                 finishLeafNode(soln, indices[tag->index]);
 
                 if (inArrayOperator) {
@@ -796,12 +801,13 @@ namespace mongo {
                 if (tightness == IndexBoundsBuilder::EXACT) {
                     return soln;
                 }
-                else if (tightness == IndexBoundsBuilder::INEXACT_COVERED) {
+                else if (tightness == IndexBoundsBuilder::INEXACT_COVERED
+                         && !indices[tag->index].multikey) {
                     verify(NULL == soln->filter.get());
                     soln->filter.reset(autoRoot.release());
                     return soln;
                 }
-                else { // tightness == IndexBoundsBuilder::INEXACT_FETCH
+                else {
                     FetchNode* fetch = new FetchNode();
                     verify(NULL != autoRoot.get());
                     fetch->filter.reset(autoRoot.release());

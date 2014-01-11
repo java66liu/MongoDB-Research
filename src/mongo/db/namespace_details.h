@@ -42,6 +42,7 @@
 #include "mongo/platform/unordered_map.h"
 
 namespace mongo {
+    class IndexCatalogEntry;
     class Database;
     class IndexCatalog;
 
@@ -274,9 +275,6 @@ namespace mongo {
             return IndexIterator(this, includeBackgroundInProgress);
         }
 
-        /* hackish - find our index # in the indexes array */
-        int idxNo(const IndexDetails& idx);
-
         /* multikey indexes are indexes where there are more than one key in the index
              for a single document. see multikey in docs.
            for these, we have to do some dedup work on queries.
@@ -335,36 +333,6 @@ namespace mongo {
             }
         }
 
-        // @return offset in indexes[]
-        int findIndexByName(const StringData& name, bool includeBackgroundInProgress = false);
-
-        // @return offset in indexes[]
-        int findIndexByKeyPattern(const BSONObj& keyPattern, 
-                                  bool includeBackgroundInProgress = false);
-
-        void findIndexByType( const string& name , vector<int>& matches ) {
-            IndexIterator i = ii();
-            while ( i.more() ) {
-                if ( IndexNames::findPluginName(i.next().keyPattern()) == name )
-                    matches.push_back( i.pos() - 1 );
-            }
-        }
-
-        /* Returns the index entry for the first index whose prefix contains
-         * 'keyPattern'. If 'requireSingleKey' is true, skip indices that contain
-         * array attributes. Otherwise, returns NULL.
-         */
-        const IndexDetails* findIndexByPrefix( const BSONObj &keyPattern ,
-                                               bool requireSingleKey );
-
-
-        /* Updates the expireAfterSeconds field of the given index to the value in newExpireSecs.
-         * The specified index must already contain an expireAfterSeconds field, and the value in
-         * that field and newExpireSecs must both be numeric.
-         */
-        void updateTTLIndex( int idxNo , const BSONElement& newExpireSecs );
-
-
         const int systemFlags() const { return _systemFlags; }
         bool isSystemFlagSet( int flag ) const { return _systemFlags & flag; }
         void setSystemFlag( int flag );
@@ -388,22 +356,6 @@ namespace mongo {
         bool replaceUserFlags( int flags );
 
         void syncUserFlags( const string& ns );
-
-        /* @return -1 = not found
-           generally id is first index, so not that expensive an operation (assuming present).
-        */
-        int findIdIndex() {
-            IndexIterator i = ii();
-            while( i.more() ) {
-                if( i.next().isIdIndex() )
-                    return i.pos()-1;
-            }
-            return -1;
-        }
-
-        bool haveIdIndex() {
-            return isSystemFlagSet( NamespaceDetails::Flag_HaveIdIndex ) || findIdIndex() >= 0;
-        }
 
         /* return which "deleted bucket" for this size object */
         static int bucket(int size) {
@@ -448,6 +400,10 @@ namespace mongo {
         NamespaceDetails *writingWithExtra();
 
     private:
+        // @return offset in indexes[]
+        int _catalogFindIndexByName( const StringData& name,
+                                     bool includeBackgroundInProgress = false);
+
         void _removeIndexFromMe( int idx );
 
         /**
@@ -462,8 +418,10 @@ namespace mongo {
         DiskLoc __stdAlloc(int len, bool willBeAt);
         void compact(); // combine adjacent deleted records
 
+        friend class Database;
         friend class NamespaceIndex;
         friend class IndexCatalog;
+        friend class IndexCatalogEntry;
 
         struct ExtraOld {
             // note we could use this field for more chaining later, so don't waste it:

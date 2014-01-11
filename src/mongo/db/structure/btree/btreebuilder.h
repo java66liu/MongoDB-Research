@@ -32,7 +32,7 @@
 
 namespace mongo {
 
-    class BtreeInMemoryState;
+    class IndexCatalogEntry;
 
     /**
      * build btree from the bottom up
@@ -43,7 +43,7 @@ namespace mongo {
         typedef typename V::Key Key;
 
         bool _dupsAllowed;
-        BtreeInMemoryState* _btreeState;
+        IndexCatalogEntry* _btreeState;
         /** Number of keys added to btree. */
         unsigned long long _numAdded;
 
@@ -60,8 +60,12 @@ namespace mongo {
         void buildNextLevel(DiskLoc loc, bool mayInterrupt);
         void mayCommitProgressDurably();
 
+        BtreeBucket<V>* _getModifiableBucket( DiskLoc loc );
+        const BtreeBucket<V>* _getBucket( DiskLoc loc );
+
+
     public:
-        BtreeBuilder(bool dupsAllowed, BtreeInMemoryState* idx);
+        BtreeBuilder(bool dupsAllowed, IndexCatalogEntry* idx);
 
         /**
          * Preconditions: 'key' is > or >= last key passed to this function (depends on _dupsAllowed)

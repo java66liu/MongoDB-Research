@@ -60,6 +60,7 @@ namespace mongo {
     namespace {
 
         const char idFieldName[] = "_id";
+        const FieldRef idFieldRef(idFieldName);
 
         // TODO: Make this a function on NamespaceString, or make it cleaner.
         inline void validateUpdate(const char* ns ,
@@ -270,13 +271,11 @@ namespace mongo {
                 }
             }
 
-            FieldRef idFR;
-            idFR.parse(idFieldName);
-            const bool idChanged = updatedFields.findConflicts(&idFR, NULL);
+            const bool idChanged = updatedFields.findConflicts(&idFieldRef, NULL);
 
             // Add _id to fields to check since it too is immutable
             if (idChanged)
-                changedImmutableFields.keepShortest(&idFR);
+                changedImmutableFields.keepShortest(&idFieldRef);
             else if (changedImmutableFields.empty()) {
                 // Return early if nothing changed which is immutable
                 return Status::OK();
@@ -362,7 +361,7 @@ namespace mongo {
             return Status::OK();
         }
 
-        Status recoverFromYield(const UpdateLifecycle* lifecycle,
+        Status recoverFromYield(UpdateLifecycle* lifecycle,
                                 UpdateDriver* driver,
                                 Collection* collection,
                                 const NamespaceString& nsString) {
@@ -402,15 +401,16 @@ namespace mongo {
                               "IndexCatalog not ok().");
 
             if (lifecycle) {
+
+                lifecycle->setCollection(collection);
+
                 if (!lifecycle->canContinue()) {
                     return Status(ErrorCodes::IllegalOperation,
                                   "Update aborted due to invalid state transitions after yield.",
                                   17270);
                 }
 
-                IndexPathSet indexes;
-                lifecycle->getIndexKeys(&indexes);
-                driver->refreshIndexKeys(indexes);
+                driver->refreshIndexKeys(lifecycle->getIndexKeys());
             }
 
             return Status::OK();
@@ -449,7 +449,7 @@ namespace mongo {
         LOG(3) << "processing update : " << request;
 
         const NamespaceString& nsString = request.getNamespaceString();
-        const UpdateLifecycle* lifecycle = request.getLifecycle();
+        UpdateLifecycle* lifecycle = request.getLifecycle();
         const CurOp* curOp = cc().curop();
         Collection* collection = cc().database()->getCollection(nsString.ns());
 
@@ -460,9 +460,8 @@ namespace mongo {
         opDebug->updateobj = request.getUpdates();
 
         if (lifecycle) {
-            IndexPathSet indexes;
-            lifecycle->getIndexKeys(&indexes);
-            driver->refreshIndexKeys(indexes);
+            lifecycle->setCollection(collection);
+            driver->refreshIndexKeys(lifecycle->getIndexKeys());
         }
 
         CanonicalQuery* cq;
@@ -471,7 +470,7 @@ namespace mongo {
         }
 
         Runner* rawRunner;
-        if (!getRunner(cq, &rawRunner).isOK()) {
+        if (!getRunner(collection, cq, &rawRunner).isOK()) {
             uasserted(17243, "could not get runner " + request.getQuery().toString());
         }
 
@@ -499,8 +498,10 @@ namespace mongo {
 
         int numMatched = 0;
 
-        // NOTE: We only store the locs of moved docs, since the runner will keep track of the rest
-        unordered_set<DiskLoc, DiskLoc::Hasher> updatedLocs;
+        // NOTE: When doing a multi-update, we only store the locs of moved docs, since the
+        // runner will keep track of the rest.
+        typedef unordered_set<DiskLoc, DiskLoc::Hasher> DiskLocSet;
+        const scoped_ptr<DiskLocSet> updatedLocs(request.isMulti() ? new DiskLocSet : NULL);
 
         // Reset these counters on each call. We might re-enter this function to retry this
         // update if we throw a page fault exception below, and we rely on these counters
@@ -509,7 +510,8 @@ namespace mongo {
         opDebug->nscanned = 0;
         opDebug->nDocsModified = 0;
 
-        mutablebson::Document doc;
+        // Get the cached document from the update driver.
+        mutablebson::Document& doc = driver->getDocument();
         mutablebson::DamageVector damages;
 
         // Used during iteration of docs
@@ -562,7 +564,7 @@ namespace mongo {
 
             // We fill this with the new locs of moved doc so we don't double-update.
             // NOTE: The runner will de-dup non-moved things.
-            if (updatedLocs.count(loc) > 0) {
+            if (updatedLocs && updatedLocs->count(loc) > 0) {
                 continue;
             }
 
@@ -582,25 +584,38 @@ namespace mongo {
             doc.reset(oldObj, mutablebson::Document::kInPlaceEnabled);
             BSONObj logObj;
 
-            // If there was a matched field, obtain it.
-            // TODO: Only do this when needed (need requirements from update_driver/mods)
-            MatchDetails matchDetails;
-            matchDetails.requestElemMatchKey();
-
-            // TODO: Find out if can move this to the query side so we don't need to double match
-            verify(cq->root()->matchesBSON(oldObj, &matchDetails));
-
-            string matchedField;
-            if (matchDetails.hasElemMatchKey())
-                matchedField = matchDetails.elemMatchKey();
 
             FieldRefSet updatedFields;
-            Status status = driver->update(matchedField, &doc, &logObj, &updatedFields);
+
+            Status status = Status::OK();
+            if (!driver->needMatchDetails()) {
+                // If we don't need match details, avoid doing the rematch
+                status = driver->update(StringData(), &doc, &logObj, &updatedFields);
+            }
+            else {
+                // If there was a matched field, obtain it.
+                MatchDetails matchDetails;
+                matchDetails.requestElemMatchKey();
+
+                verify(cq->root()->matchesBSON(oldObj, &matchDetails));
+
+                string matchedField;
+                if (matchDetails.hasElemMatchKey())
+                    matchedField = matchDetails.elemMatchKey();
+
+                // TODO: Right now, each mod checks in 'prepare' that if it needs positional
+                // data, that a non-empty StringData() was provided. In principle, we could do
+                // that check here in an else clause to the above conditional and remove the
+                // checks from the mods.
+
+                status = driver->update(matchedField, &doc, &logObj, &updatedFields);
+            }
+
             if (!status.isOK()) {
                 uasserted(16837, status.reason());
             }
 
-            const bool idRequired = collection->details()->haveIdIndex();
+            const bool idRequired = collection->getIndexCatalog()->haveIdIndex();
 
             // Move _id as first element
             mb::Element idElem = mb::findFirstChildNamed(doc.root(), idFieldName);
@@ -681,11 +696,12 @@ namespace mongo {
                 uassertStatusOK(res.getStatus());
                 DiskLoc newLoc = res.getValue();
 
-                // If we've moved this object to a new location, make sure we don't apply
-                // that update again if our traversal picks the object again.
-                // NOTE: The runner takes care of deduping non-moved docs.
-                if (newLoc != loc) {
-                    updatedLocs.insert(newLoc);
+                // If we are tracking updated DiskLocs because we are doing a multi-update, and
+                // if we've moved this object to a new location, make sure we don't apply that
+                // update again if our traversal picks the object again. NOTE: The runner takes
+                // care of deduping non-moved docs.
+                if (updatedLocs && (newLoc != loc)) {
+                    updatedLocs->insert(newLoc);
                 }
 
                 docWasModified = true;
@@ -768,7 +784,7 @@ namespace mongo {
         }
 
         // If the collection doesn't exist or has an _id index, then an _id is required
-        const bool idRequired = collection ? collection->details()->haveIdIndex() : true;
+        const bool idRequired = collection ? collection->getIndexCatalog()->haveIdIndex() : true;
 
         mb::Element idElem = mb::findFirstChildNamed(doc.root(), idFieldName);
 

@@ -34,7 +34,7 @@
 #include "mongo/db/structure/btree/btree.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/btree_key_generator.h"
-#include "mongo/db/index/btree_access_method_internal.h"
+#include "mongo/db/index/btree_based_access_method.h"
 #include "mongo/db/jsobj.h"
 
 namespace mongo {
@@ -54,7 +54,7 @@ namespace mongo {
         using BtreeBasedAccessMethod::_descriptor;
         using BtreeBasedAccessMethod::_interface;
 
-        BtreeAccessMethod(BtreeInMemoryState* btreeState );
+        BtreeAccessMethod(IndexCatalogEntry* btreeState );
         virtual ~BtreeAccessMethod() { }
 
         virtual Status newCursor(IndexCursor** out) const;

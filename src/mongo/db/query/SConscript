@@ -82,13 +82,24 @@ env.Library(
     ],
 )
 
-env.StaticLibrary(
+env.Library(
     target="query_logger",
     source=[
         "qlog.cpp"
     ],
     LIBDEPS=[
         "$BUILD_DIR/mongo/server_parameters",
+    ],
+)
+
+env.CppUnitTest(
+    target="canonical_query_test",
+    source=[
+        "canonical_query_test.cpp"
+    ],
+    LIBDEPS=[
+        "query_planner",
+        "$BUILD_DIR/mongo/expressions_text",
     ],
 )
 

@@ -464,6 +464,30 @@ namespace mongo {
         return *id;
     }
 
+    IndexDetails& NamespaceDetails::idx(int idxNo, bool missingExpected) {
+        if( idxNo < NIndexesBase ) {
+            IndexDetails& id = _indexes[idxNo];
+            return id;
+        }
+        Extra *e = extra();
+        if ( ! e ) {
+            if ( missingExpected )
+                throw MsgAssertionException( 13283 , "Missing Extra" );
+            massert(14045, "missing Extra", e);
+        }
+        int i = idxNo - NIndexesBase;
+        if( i >= NIndexesExtra ) {
+            e = e->next(this);
+            if ( ! e ) {
+                if ( missingExpected )
+                    throw MsgAssertionException( 14823 , "missing extra" );
+                massert(14824, "missing Extra", e);
+            }
+            i -= NIndexesExtra;
+        }
+        return e->details[i];
+    }
+
     // must be called when renaming a NS to fix up extra
     void NamespaceDetails::copyingFrom(const char *thisns, NamespaceDetails *src) {
         _extraOffset = 0; // we are a copy -- the old value is wrong.  fixing it up below.
@@ -522,32 +546,6 @@ namespace mongo {
     }
 
     /* ------------------------------------------------------------------------- */
-
-    void NamespaceDetails::updateTTLIndex( int idxNo , const BSONElement& newExpireSecs ) {
-        // Need to get the actual DiskLoc of the index to update. This is embedded in the 'info'
-        // object inside the IndexDetails.
-        IndexDetails idetails = idx( idxNo );
-        BSONElement oldExpireSecs = idetails.info.obj().getField("expireAfterSeconds");
-
-        // Important that we set the new value in-place.  We are writing directly to the
-        // object here so must be careful not to overwrite with a longer numeric type.
-        massert( 16630, "new 'expireAfterSeconds' must be a number", newExpireSecs.isNumber() );
-        BSONElementManipulator manip( oldExpireSecs );
-        switch( oldExpireSecs.type() ) {
-        case EOO:
-            massert( 16631, "index does not have an 'expireAfterSeconds' field", false );
-            break;
-        case NumberInt:
-        case NumberDouble:
-            manip.SetNumber( newExpireSecs.numberDouble() );
-            break;
-        case NumberLong:
-            manip.SetLong( newExpireSecs.numberLong() );
-            break;
-        default:
-            massert( 16632, "current 'expireAfterSeconds' is not a number", false );
-        }
-    }
 
     void NamespaceDetails::setSystemFlag( int flag ) {
         getDur().writingInt(_systemFlags) |= flag;
@@ -730,36 +728,8 @@ namespace mongo {
         }
     }
 
-    int NamespaceDetails::findIndexByKeyPattern(const BSONObj& keyPattern,
-                                                bool includeBackgroundInProgress) {
-        IndexIterator i = ii(includeBackgroundInProgress);
-        while( i.more() ) {
-            if( i.next().keyPattern() == keyPattern )
-                return i.pos()-1;
-        }
-        return -1;
-    }
-
-    const IndexDetails* NamespaceDetails::findIndexByPrefix( const BSONObj &keyPattern ,
-                                                             bool requireSingleKey ) {
-        const IndexDetails* bestMultiKeyIndex = NULL;
-        IndexIterator i = ii();
-        while( i.more() ) {
-            const IndexDetails& currentIndex = i.next();
-            if( keyPattern.isPrefixOf( currentIndex.keyPattern() ) ){
-                if( ! isMultikey( i.pos()-1 ) ){
-                    return &currentIndex;
-                } else {
-                    bestMultiKeyIndex = &currentIndex;
-                }
-            }
-        }
-        return requireSingleKey ? NULL : bestMultiKeyIndex;
-    }
-
-    // @return offset in indexes[]
-    int NamespaceDetails::findIndexByName(const StringData& name,
-                                          bool includeBackgroundInProgress) {
+    int NamespaceDetails::_catalogFindIndexByName(const StringData& name,
+                                                  bool includeBackgroundInProgress) {
         IndexIterator i = ii(includeBackgroundInProgress);
         while( i.more() ) {
             if ( name == i.next().info.obj().getStringField("name") )

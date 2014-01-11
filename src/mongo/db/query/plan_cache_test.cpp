@@ -32,6 +32,7 @@
 
 #include "mongo/db/query/plan_cache.h"
 
+#include <algorithm>
 #include <ostream>
 #include <sstream>
 #include <memory>
@@ -127,6 +128,91 @@ namespace {
         FAIL(ss.str());
     }
 
+    //
+    // Tests for CachedSolution
+    //
+
+    /**
+     * Generator for vector of QuerySolution shared pointers.
+     */
+    struct GenerateQuerySolution {
+        QuerySolution* operator()() const {
+            auto_ptr<QuerySolution> qs(new QuerySolution());
+            qs->cacheData.reset(new SolutionCacheData());
+            qs->cacheData->solnType = SolutionCacheData::COLLSCAN_SOLN;
+            qs->cacheData->tree.reset(new PlanCacheIndexTree());
+            return qs.release();
+        }
+    };
+
+    /**
+     * Clean up query solutions vector.
+     */
+    void deleteQuerySolutions(std::vector<QuerySolution*>* solns) {
+        for (std::vector<QuerySolution*>::const_iterator i = solns->begin();
+             i != solns->end(); ++i) {
+            QuerySolution* qs = *i;
+            delete qs;
+        }
+        solns->clear();
+    }
+
+    TEST(CachedSolutionTest, GetWinnerIndexNoPinnedOrShunnedPlans) {
+        std::vector<QuerySolution*> solns(5U);
+        for (size_t i = 0; i<solns.size(); ++i) {
+            auto_ptr<QuerySolution> qs(new QuerySolution());
+            qs->cacheData.reset(new SolutionCacheData());
+            qs->cacheData->solnType = SolutionCacheData::COLLSCAN_SOLN;
+            qs->cacheData->tree.reset(new PlanCacheIndexTree());
+            solns[i] = qs.release();
+        }
+        PlanCacheEntry entry(solns, new PlanRankingDecision());
+        deleteQuerySolutions(&solns);
+        PlanCacheKey key("boguskey");
+        CachedSolution cs(key, entry);
+        ASSERT_EQUALS(0U, cs.getWinnerIndex());
+    }
+
+    TEST(CachedSolutionTest, GetWinnerIndexWithPinnedPlan) {
+        std::vector<QuerySolution*> solns(5U);
+        std::generate(solns.begin(), solns.end(), GenerateQuerySolution());
+        PlanCacheEntry entry(solns, new PlanRankingDecision());
+        deleteQuerySolutions(&solns);
+        // Pin 3rd plan.
+        entry.pinned = true;
+        entry.pinnedIndex = 2U;
+        PlanCacheKey key("boguskey");
+        CachedSolution cs(key, entry);
+        ASSERT_EQUALS(entry.pinnedIndex, cs.getWinnerIndex());
+    }
+
+    TEST(CachedSolutionTest, GetWinnerIndexWithShunnedPlans) {
+        std::vector<QuerySolution*> solns(5U);
+        std::generate(solns.begin(), solns.end(), GenerateQuerySolution());
+        PlanCacheEntry entry(solns, new PlanRankingDecision());
+        deleteQuerySolutions(&solns);
+        // Shun first 2 plans.
+        entry.shunnedIndexes.insert(0U);
+        entry.shunnedIndexes.insert(1U);
+        PlanCacheKey key("boguskey");
+        CachedSolution cs(key, entry);
+        ASSERT_EQUALS(2U, cs.getWinnerIndex());
+    }
+
+    TEST(CachedSolutionTest, GetWinnerIndexWithPinnedAndShunnedPlan) {
+        std::vector<QuerySolution*> solns(5U);
+        std::generate(solns.begin(), solns.end(), GenerateQuerySolution());
+        PlanCacheEntry entry(solns, new PlanRankingDecision());
+        deleteQuerySolutions(&solns);
+        // Pin and shun 2nd plan.
+        entry.pinned = true;
+        entry.pinnedIndex = 1U;
+        entry.shunnedIndexes.insert(1U);
+        PlanCacheKey key("boguskey");
+        CachedSolution cs(key, entry);
+        ASSERT_EQUALS(1U, cs.getWinnerIndex());
+    }
+
     /**
      * Test functions for shouldCacheQuery
      * Use these functions to assert which categories
@@ -134,7 +220,7 @@ namespace {
      * in the planner cache.
      */
     void assertShouldCacheQuery(const CanonicalQuery& query) {
-        if (shouldCacheQuery(query)) {
+        if (PlanCache::shouldCacheQuery(query)) {
             return;
         }
         stringstream ss;
@@ -143,7 +229,7 @@ namespace {
     }
 
     void assertShouldNotCacheQuery(const CanonicalQuery& query) {
-        if (!shouldCacheQuery(query)) {
+        if (!PlanCache::shouldCacheQuery(query)) {
             return;
         }
         stringstream ss;
@@ -164,6 +250,11 @@ namespace {
 
     TEST(PlanCacheTest, ShouldCacheQueryBasic) {
         auto_ptr<CanonicalQuery> cq(canonicalize("{a: 1}"));
+        assertShouldCacheQuery(*cq);
+    }
+
+    TEST(PlanCacheTest, ShouldCacheQuerySort) {
+        auto_ptr<CanonicalQuery> cq(canonicalize("{}", "{a: -1}", "{_id: 0, a: 1}"));
         assertShouldCacheQuery(*cq);
     }
 
@@ -220,7 +311,7 @@ namespace {
 
     void testNormalizeQueryForCache(const char* queryStr, const char* expectedExprStr) {
         auto_ptr<CanonicalQuery> cq(canonicalize(queryStr));
-        normalizeQueryForCache(cq.get());
+        PlanCache::normalizeQueryForCache(cq.get());
         MatchExpression* me = cq->root();
         BSONObj expectedExprObj = fromjson(expectedExprStr);
         auto_ptr<MatchExpression> expectedExpr(parseMatchExpression(expectedExprObj));
@@ -237,26 +328,79 @@ namespace {
                                    "{a: {$elemMatch: {b: 1, c:1}}}");
     }
 
+    // Adding an empty vector of query solutions should fail.
+    TEST(PlanCacheTest, AddEmptySolutions) {
+        PlanCache planCache;
+        auto_ptr<CanonicalQuery> cq(canonicalize("{a: 1}"));
+        std::vector<QuerySolution*> solns;
+        ASSERT_NOT_OK(planCache.add(*cq, solns, new PlanRankingDecision()));
+    }
+
     TEST(PlanCacheTest, AddValidSolution) {
         PlanCache planCache;
         auto_ptr<CanonicalQuery> cq(canonicalize("{a: 1}"));
         QuerySolution qs;
         qs.cacheData.reset(new SolutionCacheData());
         qs.cacheData->tree.reset(new PlanCacheIndexTree());
-        ASSERT_OK(planCache.add(*cq, qs, new PlanRankingDecision()));
+        std::vector<QuerySolution*> solns;
+        solns.push_back(&qs);
+        ASSERT_OK(planCache.add(*cq, solns, new PlanRankingDecision()));
         std::vector<PlanCacheKey> keys;
+        planCache.getKeys(&keys);
+        ASSERT_EQUALS(keys.size(), 1U);
+
+        // Calling getKeys() with a non-empty vector
+        // should result in the vector contents being replaced.
         planCache.getKeys(&keys);
         ASSERT_EQUALS(keys.size(), 1U);
     }
 
-    // Adding a query solution without valid cache data should fail.
-    TEST(PlanCacheTest, AddInvalidSolution) {
+    TEST(PlanCacheTest, NotifyOfWriteOp) {
         PlanCache planCache;
         auto_ptr<CanonicalQuery> cq(canonicalize("{a: 1}"));
         QuerySolution qs;
-        ASSERT_NOT_OK(planCache.add(*cq, qs, new PlanRankingDecision()));
-    }
+        qs.cacheData.reset(new SolutionCacheData());
+        qs.cacheData->tree.reset(new PlanCacheIndexTree());
+        std::vector<QuerySolution*> solns;
+        solns.push_back(&qs);
+        ASSERT_OK(planCache.add(*cq, solns, new PlanRankingDecision()));
+        std::vector<PlanCacheKey> keys;
+        planCache.getKeys(&keys);
+        ASSERT_EQUALS(keys.size(), 1U);
 
+        // First (PlanCache::kPlanCacheMaxWriteOperations - 1) notifications should have
+        // no effect on cache contents.
+        for (int i = 0; i < (PlanCache::kPlanCacheMaxWriteOperations - 1); ++i) {
+            planCache.notifyOfWriteOp();
+        }
+        planCache.getKeys(&keys);
+        ASSERT_EQUALS(keys.size(), 1U);
+
+        // 1000th notification will cause cache to be cleared.
+        planCache.notifyOfWriteOp();
+        planCache.getKeys(&keys);
+        ASSERT_TRUE(keys.empty());
+
+        // Clearing the cache should reset the internal write
+        // operation counter.
+        // Repopulate cache. Write (PlanCache::kPlanCacheMaxWriteOperations - 1) times.
+        // Clear cache.
+        // Add cache entry again.
+        // After clearing and adding a new entry, the next write operation should not
+        // clear the cache.
+        ASSERT_OK(planCache.add(*cq, solns, new PlanRankingDecision()));
+        for (int i = 0; i < (PlanCache::kPlanCacheMaxWriteOperations - 1); ++i) {
+            planCache.notifyOfWriteOp();
+        }
+        planCache.getKeys(&keys);
+        ASSERT_EQUALS(keys.size(), 1U);
+        planCache.clear();
+        ASSERT_OK(planCache.add(*cq, solns, new PlanRankingDecision()));
+        // Notification after clearing will not flush cache.
+        planCache.notifyOfWriteOp();
+        planCache.getKeys(&keys);
+        ASSERT_EQUALS(keys.size(), 1U);
+    }
     /**
      * Test functions for getPlanCacheKey.
      * Cache keys are intentionally obfuscated and are meaningful only
@@ -264,9 +408,10 @@ namespace {
      * plan cache keys as opaque.
      */
     void testGetPlanCacheKey(const char* queryStr, const char* sortStr,
+                             const char* projStr,
                              const char *expectedStr) {
-        auto_ptr<CanonicalQuery> cq(canonicalize(queryStr, sortStr, "{}"));
-        PlanCacheKey key = getPlanCacheKey(*cq);
+        auto_ptr<CanonicalQuery> cq(canonicalize(queryStr, sortStr, projStr));
+        PlanCacheKey key = PlanCache::getPlanCacheKey(*cq);
         PlanCacheKey expectedKey(expectedStr);
         if (key == expectedKey) {
             return;
@@ -280,12 +425,19 @@ namespace {
     TEST(PlanCacheTest, getPlanCacheKey) {
         // Generated cache keys should be treated as opaque to the user.
         // No sorts
-        testGetPlanCacheKey("{}", "{}", "an");
-        testGetPlanCacheKey("{$or: [{a: 1}, {b: 2}]}", "{}", "oreqaeqb");
+        testGetPlanCacheKey("{}", "{}", "{}", "an");
+        testGetPlanCacheKey("{$or: [{a: 1}, {b: 2}]}", "{}", "{}", "oreqaeqb");
         // With sort
-        testGetPlanCacheKey("{}", "{a: 1}", "anaa");
-        testGetPlanCacheKey("{}", "{a: -1}", "anda");
-        testGetPlanCacheKey("{}", "{a: {$meta: 'textScore'}}", "anta");
+        testGetPlanCacheKey("{}", "{a: 1}", "{}", "anaa");
+        testGetPlanCacheKey("{}", "{a: -1}", "{}", "anda");
+        testGetPlanCacheKey("{}", "{a: {$meta: 'textScore'}}", "{}", "anta");
+        // With projection
+        testGetPlanCacheKey("{}", "{}", "{a: 1}", "anp1a");
+        testGetPlanCacheKey("{}", "{}", "{a: 0}", "anp0a");
+        testGetPlanCacheKey("{}", "{}", "{a: 99}", "anp99a");
+        testGetPlanCacheKey("{}", "{}", "{a: 'foo'}", "anp\"foo\"a");
+        testGetPlanCacheKey("{}", "{}", "{a: {$slice: [3, 5]}}", "anp{ $slice: [ 3, 5 ] }a");
+        testGetPlanCacheKey("{}", "{}", "{a: {$elemMatch: {x: 2}}}", "anp{ $elemMatch: { x: 2 } }a");
     }
 
     /**
@@ -446,9 +598,14 @@ namespace {
             scoped_ptr<CanonicalQuery> scopedCq(cq);
             cq = NULL;
 
-            CachedSolution cachedSoln;
-            cachedSoln.key = ck;
-            cachedSoln.plannerData.reset(soln.cacheData->clone());
+            // Create a CachedSolution the long way..
+            // QuerySolution -> PlanCacheEntry -> CachedSolution
+            QuerySolution qs;
+            qs.cacheData.reset(soln.cacheData->clone());
+            std::vector<QuerySolution*> solutions;
+            solutions.push_back(&qs);
+            PlanCacheEntry entry(solutions, new PlanRankingDecision());
+            CachedSolution cachedSoln(ck, entry);
 
             QuerySolution* out;
             s = QueryPlanner::planFromCache(*scopedCq.get(), params, &cachedSoln, &out);
@@ -572,35 +729,6 @@ namespace {
     // Geo
     //
 
-    TEST_F(CachePlanSelectionTest, Basic2DNonNear) {
-        addIndex(BSON("a" << "2d"));
-        BSONObj query;
-
-        // Polygon
-        query = fromjson("{a : { $within: { $polygon : [[0,0], [2,0], [4,0]] } }}");
-        runQuery(query);
-        assertPlanCacheRecoversSolution(query,
-            "{fetch: {node: {geo2d: {a: '2d'}}}}");
-
-        // Center
-        query = fromjson("{a : { $within : { $center : [[ 5, 5 ], 7 ] } }}");
-        runQuery(query);
-        assertPlanCacheRecoversSolution(query,
-            "{fetch: {node: {geo2d: {a: '2d'}}}}");
-
-        // Centersphere
-        query = fromjson("{a : { $within : { $centerSphere : [[ 10, 20 ], 0.01 ] } }}");
-        runQuery(query);
-        assertPlanCacheRecoversSolution(query,
-            "{fetch: {node: {geo2d: {a: '2d'}}}}");
-
-        // Within box.
-        query = fromjson("{a : {$within: {$box : [[0,0],[9,9]]}}}");
-        runQuery(query);
-        assertPlanCacheRecoversSolution(query,
-            "{fetch: {node: {geo2d: {a: '2d'}}}}");
-    }
-
     TEST_F(CachePlanSelectionTest, Basic2DSphereNonNear) {
         addIndex(BSON("a" << "2dsphere"));
         BSONObj query;
@@ -644,17 +772,6 @@ namespace {
         runQuery(BSON("x" << 1));
         assertPlanCacheRecoversSolution(BSON("x" << 1),
             "{fetch: {node: {ixscan: {pattern: {x: 1, a: '2dsphere'}}}}}");
-    }
-
-    TEST_F(CachePlanSelectionTest, Or2DNonNear) {
-        addIndex(BSON("a" << "2d"));
-        addIndex(BSON("b" << "2d"));
-        BSONObj query = fromjson("{$or: [ {a : { $within : { $polygon : [[0,0], [2,0], [4,0]] } }},"
-                                        " {b : { $within : { $center : [[ 5, 5 ], 7 ] } }} ]}");
-
-        runQuery(query);
-        assertPlanCacheRecoversSolution(query,
-            "{fetch: {node: {or: {nodes: [{geo2d: {a: '2d'}}, {geo2d: {b: '2d'}}]}}}}");
     }
 
     TEST_F(CachePlanSelectionTest, Or2DSphereNonNear) {
@@ -733,7 +850,6 @@ namespace {
         BSONObj sort = BSON("c" << 1);
         runQuerySortProj(query, sort, BSONObj());
 
-        assertNotCached("{sort: {pattern: {c: 1}, limit: 0, node: {cscan: {dir: 1}}}}");
         assertPlanCacheRecoversSolution(query, sort, BSONObj(),
             "{fetch: {node: {mergeSort: {nodes: "
                 "[{ixscan: {pattern: {a: 1, c: 1}}}, {ixscan: {pattern: {b: 1, c: 1}}}]}}}}");
@@ -783,21 +899,40 @@ namespace {
     }
 
     //
-    // Check queries that, at least for now, are not cached.
+    // Caching collection scans.
     //
 
-    TEST_F(CachePlanSelectionTest, NoUsefulIndicesNotCached) {
+    TEST_F(CachePlanSelectionTest, CollscanNoUsefulIndices) {
         addIndex(BSON("a" << 1 << "b" << 1));
         addIndex(BSON("c" << 1));
         runQuery(BSON("b" << 4));
-        assertNotCached("{cscan: {dir: 1}}");
+        assertPlanCacheRecoversSolution(BSON("b" << 4),
+            "{cscan: {filter: {b: 4}, dir: 1}}");
     }
 
-    TEST_F(CachePlanSelectionTest, OrWithoutEnoughIndicesNotCached) {
+    TEST_F(CachePlanSelectionTest, CollscanOrWithoutEnoughIndices) {
         addIndex(BSON("a" << 1));
-        runQuery(fromjson("{$or: [{a: 20}, {b: 21}]}"));
-        assertNotCached("{cscan: {dir: 1, filter: {$or: [{a: 20}, {b: 21}]}}}");
+        BSONObj query =fromjson("{$or: [{a: 20}, {b: 21}]}");
+        runQuery(query);
+        assertPlanCacheRecoversSolution(query,
+            "{cscan: {filter: {$or:[{a:20},{b:21}]}, dir: 1}}");
     }
+
+    TEST_F(CachePlanSelectionTest, CollscanMergeSort) {
+        addIndex(BSON("a" << 1 << "c" << 1));
+        addIndex(BSON("b" << 1 << "c" << 1));
+
+        BSONObj query = fromjson("{$or: [{a:1}, {b:1}]}");
+        BSONObj sort = BSON("c" << 1);
+        runQuerySortProj(query, sort, BSONObj());
+
+        assertPlanCacheRecoversSolution(query, sort, BSONObj(),
+            "{sort: {pattern: {c: 1}, limit: 0, node: {cscan: {dir: 1}}}}");
+    }
+
+    //
+    // Check queries that, at least for now, are not cached.
+    //
 
     TEST_F(CachePlanSelectionTest, GeoNear2DNotCached) {
         addIndex(BSON("a" << "2d"));
@@ -832,6 +967,45 @@ namespace {
         runQueryHint(BSONObj(), fromjson("{a: 1}"));
         assertNotCached("{fetch: {filter: null, "
                             "node: {ixscan: {filter: null, pattern: {a: 1}}}}}");
+    }
+
+    //
+    // Queries using '2d' indices are not cached.
+    //
+
+    TEST_F(CachePlanSelectionTest, Basic2DNonNearNotCached) {
+        addIndex(BSON("a" << "2d"));
+        BSONObj query;
+
+        // Polygon
+        query = fromjson("{a : { $within: { $polygon : [[0,0], [2,0], [4,0]] } }}");
+        runQuery(query);
+        assertNotCached("{fetch: {node: {geo2d: {a: '2d'}}}}");
+
+        // Center
+        query = fromjson("{a : { $within : { $center : [[ 5, 5 ], 7 ] } }}");
+        runQuery(query);
+        assertNotCached("{fetch: {node: {geo2d: {a: '2d'}}}}");
+
+        // Centersphere
+        query = fromjson("{a : { $within : { $centerSphere : [[ 10, 20 ], 0.01 ] } }}");
+        runQuery(query);
+        assertNotCached("{fetch: {node: {geo2d: {a: '2d'}}}}");
+
+        // Within box.
+        query = fromjson("{a : {$within: {$box : [[0,0],[9,9]]}}}");
+        runQuery(query);
+        assertNotCached("{fetch: {node: {geo2d: {a: '2d'}}}}");
+    }
+
+    TEST_F(CachePlanSelectionTest, Or2DNonNearNotCached) {
+        addIndex(BSON("a" << "2d"));
+        addIndex(BSON("b" << "2d"));
+        BSONObj query = fromjson("{$or: [ {a : { $within : { $polygon : [[0,0], [2,0], [4,0]] } }},"
+                                        " {b : { $within : { $center : [[ 5, 5 ], 7 ] } }} ]}");
+
+        runQuery(query);
+        assertNotCached("{fetch: {node: {or: {nodes: [{geo2d: {a: '2d'}}, {geo2d: {b: '2d'}}]}}}}");
     }
 
 }  // namespace

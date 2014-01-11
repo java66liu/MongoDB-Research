@@ -44,7 +44,6 @@
 
 #include "mongo/client/connpool.h"
 #include "mongo/client/dbclientcursor.h"
-#include "mongo/client/distlock.h"
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_manager.h"
@@ -72,6 +71,7 @@
 #include "mongo/s/chunk_version.h"
 #include "mongo/s/config.h"
 #include "mongo/s/d_logic.h"
+#include "mongo/s/distlock.h"
 #include "mongo/s/shard.h"
 #include "mongo/s/type_chunk.h"
 #include "mongo/util/assert_util.h"
@@ -409,7 +409,7 @@ namespace mongo {
             BSONObj min = Helpers::toKeyFormat( kp.extendRangeBound( _min, false ) );
             BSONObj max = Helpers::toKeyFormat( kp.extendRangeBound( _max, false ) );
 
-            auto_ptr<Runner> runner(InternalPlanner::indexScan(idx, min, max, false));
+            auto_ptr<Runner> runner(InternalPlanner::indexScan(collection, idx, min, max, false));
             // we can afford to yield here because any change to the base data that we might miss is
             // already being  queued and will be migrated in the 'transferMods' stage
             runner->setYieldPolicy(Runner::YIELD_AUTO);
@@ -673,12 +673,13 @@ namespace mongo {
 
     class TransferModsCommand : public ChunkCommandHelper {
     public:
+        void help(stringstream& h) const { h << "internal"; }
         TransferModsCommand() : ChunkCommandHelper( "_transferMods" ) {}
         virtual void addRequiredPrivileges(const std::string& dbname,
                                            const BSONObj& cmdObj,
                                            std::vector<Privilege>* out) {
             ActionSet actions;
-            actions.addAction(ActionType::_transferMods);
+            actions.addAction(ActionType::internal);
             out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
         }
         bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
@@ -689,12 +690,13 @@ namespace mongo {
 
     class InitialCloneCommand : public ChunkCommandHelper {
     public:
+        void help(stringstream& h) const { h << "internal"; }
         InitialCloneCommand() : ChunkCommandHelper( "_migrateClone" ) {}
         virtual void addRequiredPrivileges(const std::string& dbname,
                                            const BSONObj& cmdObj,
                                            std::vector<Privilege>* out) {
             ActionSet actions;
-            actions.addAction(ActionType::_migrateClone);
+            actions.addAction(ActionType::internal);
             out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
         }
         bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
@@ -2112,6 +2114,7 @@ namespace mongo {
 
     class RecvChunkStartCommand : public ChunkCommandHelper {
     public:
+        void help(stringstream& h) const { h << "internal"; }
         RecvChunkStartCommand() : ChunkCommandHelper( "_recvChunkStart" ) {}
 
         virtual LockType locktype() const { return NONE; }
@@ -2119,7 +2122,7 @@ namespace mongo {
                                            const BSONObj& cmdObj,
                                            std::vector<Privilege>* out) {
             ActionSet actions;
-            actions.addAction(ActionType::_recvChunkStart);
+            actions.addAction(ActionType::internal);
             out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
         }
         bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
@@ -2212,12 +2215,13 @@ namespace mongo {
 
     class RecvChunkStatusCommand : public ChunkCommandHelper {
     public:
+        void help(stringstream& h) const { h << "internal"; }
         RecvChunkStatusCommand() : ChunkCommandHelper( "_recvChunkStatus" ) {}
         virtual void addRequiredPrivileges(const std::string& dbname,
                                            const BSONObj& cmdObj,
                                            std::vector<Privilege>* out) {
             ActionSet actions;
-            actions.addAction(ActionType::_recvChunkStatus);
+            actions.addAction(ActionType::internal);
             out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
         }
         bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
@@ -2229,12 +2233,13 @@ namespace mongo {
 
     class RecvChunkCommitCommand : public ChunkCommandHelper {
     public:
+        void help(stringstream& h) const { h << "internal"; }
         RecvChunkCommitCommand() : ChunkCommandHelper( "_recvChunkCommit" ) {}
         virtual void addRequiredPrivileges(const std::string& dbname,
                                            const BSONObj& cmdObj,
                                            std::vector<Privilege>* out) {
             ActionSet actions;
-            actions.addAction(ActionType::_recvChunkCommit);
+            actions.addAction(ActionType::internal);
             out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
         }
         bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
@@ -2247,12 +2252,13 @@ namespace mongo {
 
     class RecvChunkAbortCommand : public ChunkCommandHelper {
     public:
+        void help(stringstream& h) const { h << "internal"; }
         RecvChunkAbortCommand() : ChunkCommandHelper( "_recvChunkAbort" ) {}
         virtual void addRequiredPrivileges(const std::string& dbname,
                                            const BSONObj& cmdObj,
                                            std::vector<Privilege>* out) {
             ActionSet actions;
-            actions.addAction(ActionType::_recvChunkAbort);
+            actions.addAction(ActionType::internal);
             out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
         }
         bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {

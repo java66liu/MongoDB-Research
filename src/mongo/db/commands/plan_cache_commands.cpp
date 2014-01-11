@@ -58,12 +58,9 @@ namespace {
     }
 
     /**
-     * Retrieves a collection's plan cache from the client context.
+     * Retrieves a collection's plan cache from the database.
      */
-    Status getPlanCache(const Client::Context& ctx, PlanCache** planCacheOut) {
-        const char* ns = ctx.ns();
-
-        Database* db = ctx.db();
+    Status getPlanCache(Database* db, const string& ns, PlanCache** planCacheOut) {
         verify(db);
 
         Collection* collection = db->getCollection(ns);
@@ -79,11 +76,6 @@ namespace {
 
         *planCacheOut = planCache;
         return Status::OK();
-    }
-
-    Status getPlanCache(Client::ReadContext& readCtx, PlanCache** planCacheOut) {
-        Client::Context& ctx = readCtx.ctx();
-        return getPlanCache(ctx, planCacheOut);
     }
 
     //
@@ -173,8 +165,9 @@ namespace mongo {
                                                   BSONObjBuilder* bob) {
         // This is a read lock. The query cache is owned by the collection.
         Client::ReadContext readCtx(ns);
+        Client::Context& ctx = readCtx.ctx();
         PlanCache* planCache;
-        Status status = getPlanCache(readCtx, &planCache);
+        Status status = getPlanCache(ctx.db(), ns, &planCache);
         if (!status.isOK()) {
             return status;
         }
@@ -206,8 +199,9 @@ namespace mongo {
                                                BSONObjBuilder* bob) {
         // This is a read lock. The query cache is owned by the collection.
         Client::ReadContext readCtx(ns);
+        Client::Context& ctx = readCtx.ctx();
         PlanCache* planCache;
-        Status status = getPlanCache(readCtx, &planCache);
+        Status status = getPlanCache(ctx.db(), ns, &planCache);
         if (!status.isOK()) {
             return status;
         }
@@ -261,8 +255,17 @@ namespace mongo {
             sortObj = sortElt.Obj();
         }
 
-        // Create canonical query
+        // projection - optional
+        BSONElement projElt = cmdObj.getField("projection");
         BSONObj projObj;
+        if (!projElt.eoo()) {
+            if (!projElt.isABSONObj()) {
+                return Status(ErrorCodes::BadValue, "optional field projection must be an object");
+            }
+            projObj = projElt.Obj();
+        }
+
+        // Create canonical query
         CanonicalQuery* cqRaw;
         Status result = CanonicalQuery::canonicalize(ns, queryObj, sortObj, projObj, &cqRaw);
         if (!result.isOK()) {
@@ -271,10 +274,10 @@ namespace mongo {
         scoped_ptr<CanonicalQuery> cq(cqRaw);
 
         // Canonical query needs to be normalized before generating cache key.
-        normalizeQueryForCache(cq.get());
+        PlanCache::normalizeQueryForCache(cq.get());
 
         // Generate key
-        PlanCacheKey key = getPlanCacheKey(*cq);
+        PlanCacheKey key = PlanCache::getPlanCacheKey(*cq);
         bob->append("key", key);
 
         return Status::OK();
@@ -287,8 +290,9 @@ namespace mongo {
     Status PlanCacheGet::runPlanCacheCommand(const string& ns, BSONObj& cmdObj,
                                              BSONObjBuilder* bob) {
         Client::ReadContext readCtx(ns);
+        Client::Context& ctx = readCtx.ctx();
         PlanCache* planCache;
-        Status status = getPlanCache(readCtx, &planCache);
+        Status status = getPlanCache(ctx.db(), ns, &planCache);
         if (!status.isOK()) {
             return status;
         }
@@ -331,8 +335,9 @@ namespace mongo {
     Status PlanCacheDrop::runPlanCacheCommand(const string& ns, BSONObj& cmdObj,
                                               BSONObjBuilder* bob) {
         Client::ReadContext readCtx(ns);
+        Client::Context& ctx = readCtx.ctx();
         PlanCache* planCache;
-        Status status = getPlanCache(readCtx, &planCache);
+        Status status = getPlanCache(ctx.db(), ns, &planCache);
         if (!status.isOK()) {
             return status;
         }
@@ -365,8 +370,9 @@ namespace mongo {
     Status PlanCacheListPlans::runPlanCacheCommand(const string& ns, BSONObj& cmdObj,
                                                    BSONObjBuilder* bob) {
         Client::ReadContext readCtx(ns);
+        Client::Context& ctx = readCtx.ctx();
         PlanCache* planCache;
-        Status status = getPlanCache(readCtx, &planCache);
+        Status status = getPlanCache(ctx.db(), ns, &planCache);
         if (!status.isOK()) {
             return status;
         }
@@ -394,14 +400,33 @@ namespace mongo {
         }
         scoped_ptr<CachedSolution> cr(crRaw);
 
-        // XXX: Fix these field values once we have fleshed out cache entries.
         BSONArrayBuilder plansBuilder(bob->subarrayStart("plans"));
-        size_t numPlans = cr->numPlans;
+        size_t numPlans = cr->plannerData.size();
         for (size_t i = 0; i < numPlans; ++i) {
             BSONObjBuilder planBob(plansBuilder.subobjStart());
             stringstream ss;
             ss << "plan" << i;
             planBob.append("plan", ss.str());
+
+            // Create plan details field.
+            // Currently, simple string representationg of
+            // SolutionCacheData. Need to revisit format when we
+            // need to parse user-provided plan details for planCacheAddPlan.
+            SolutionCacheData* scd = cr->plannerData[i];
+            BSONObjBuilder detailsBob(planBob.subobjStart("details"));
+            detailsBob.append("solution", scd->toString());
+            detailsBob.doneFast();
+
+            bool pinned = (cr->pinned && i == cr->pinnedIndex);
+            bool shunned = (cr->shunnedIndexes.find(i) != cr->shunnedIndexes.end());
+
+            // XXX: Fill in rest of fields with bogus data.
+            // XXX: Fix these field values once we have fleshed out cache entries.
+            planBob.append("reason", BSONObj());
+            planBob.append("feedback", BSONObj());
+            planBob.append("pinned", pinned);
+            planBob.append("shunned", shunned);
+            planBob.append("source", "planner");
         }
         plansBuilder.doneFast();
 
@@ -416,8 +441,9 @@ namespace mongo {
     Status PlanCachePinPlan::runPlanCacheCommand(const string& ns, BSONObj& cmdObj,
                                                  BSONObjBuilder* bob) {
         Client::ReadContext readCtx(ns);
+        Client::Context& ctx = readCtx.ctx();
         PlanCache* planCache;
-        Status status = getPlanCache(readCtx, &planCache);
+        Status status = getPlanCache(ctx.db(), ns, &planCache);
         if (!status.isOK()) {
             return status;
         }
@@ -462,8 +488,9 @@ namespace mongo {
     Status PlanCacheUnpinPlan::runPlanCacheCommand(const string& ns, BSONObj& cmdObj,
                                                    BSONObjBuilder* bob) {
         Client::ReadContext readCtx(ns);
+        Client::Context& ctx = readCtx.ctx();
         PlanCache* planCache;
-        Status status = getPlanCache(readCtx, &planCache);
+        Status status = getPlanCache(ctx.db(), ns, &planCache);
         if (!status.isOK()) {
             return status;
         }
@@ -498,8 +525,9 @@ namespace mongo {
     Status PlanCacheAddPlan::runPlanCacheCommand(const string& ns, BSONObj& cmdObj,
                                                  BSONObjBuilder* bob) {
         Client::ReadContext readCtx(ns);
+        Client::Context& ctx = readCtx.ctx();
         PlanCache* planCache;
-        Status status = getPlanCache(readCtx, &planCache);
+        Status status = getPlanCache(ctx.db(), ns, &planCache);
         if (!status.isOK()) {
             return status;
         }
@@ -548,8 +576,9 @@ namespace mongo {
     Status PlanCacheShunPlan::runPlanCacheCommand(const string& ns, BSONObj& cmdObj,
                                                   BSONObjBuilder* bob) {
         Client::ReadContext readCtx(ns);
+        Client::Context& ctx = readCtx.ctx();
         PlanCache* planCache;
-        Status status = getPlanCache(readCtx, &planCache);
+        Status status = getPlanCache(ctx.db(), ns, &planCache);
         if (!status.isOK()) {
             return status;
         }

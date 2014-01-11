@@ -59,11 +59,9 @@ namespace mongo {
             if ( !collection )
                 return PlanStage::IS_EOF;
 
-            int idxNo = collection->details()->findIndexByKeyPattern(_params.indexKeyPattern);
-            if (-1 == idxNo)
+            IndexDescriptor* desc = collection->getIndexCatalog()->findIndexByKeyPattern(_params.indexKeyPattern);
+            if ( desc == NULL )
                 return PlanStage::IS_EOF;
-
-            IndexDescriptor* desc = collection->getIndexCatalog()->getDescriptor(idxNo);
             TwoDAccessMethod* am = static_cast<TwoDAccessMethod*>( collection->getIndexCatalog()->getIndex( desc ) );
 
             auto_ptr<twod_exec::GeoSearch> search;
@@ -511,8 +509,7 @@ namespace twod_exec {
             // If we're not, and we're done with points, break
             if(! inWindow && expandedPoints >= _max) break;
 
-            bool expandApprox = !currPt.isExact() &&
-                (!_uniqueDocs || (finish && _needDistance) || inWindow);
+            bool expandApprox = !currPt.isExact() && (!_uniqueDocs || finish || inWindow);
 
             if (expandApprox) {
                 // Add new point(s). These will only be added in a radius of 2 * _distError

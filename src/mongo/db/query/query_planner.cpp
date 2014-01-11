@@ -164,8 +164,10 @@ namespace mongo {
     Status QueryPlanner::cacheDataFromTaggedTree(const MatchExpression* const taggedTree,
                                                  const vector<IndexEntry>& relevantIndices,
                                                  PlanCacheIndexTree** out) {
+        // On any early return, the out-parameter must contain NULL.
+        *out = NULL;
+
         if (NULL == taggedTree) {
-            *out = NULL;
             return Status(ErrorCodes::BadValue, "Cannot produce cache data: tree is NULL.");
         }
 
@@ -174,13 +176,23 @@ namespace mongo {
         if (NULL != taggedTree->getTag()) {
             IndexTag* itag = static_cast<IndexTag*>(taggedTree->getTag());
             if (itag->index >= relevantIndices.size()) {
-                *out = NULL;
                 std::stringstream ss;
                 ss << "Index number is " << itag->index
                    << " but there are only " << relevantIndices.size()
                    << " relevant indices.";
                 return Status(ErrorCodes::BadValue, ss.str());
             }
+
+            // Make sure not to cache solutions which use '2d' indices.
+            // A 2d index that doesn't wrap on one query may wrap on another, so we have to
+            // check that the index is OK with the predicate. The only thing we have to do
+            // this for is 2d.  For now it's easier to move ahead if we don't cache 2d.
+            //
+            // XXX: revisit with a post-cached-index-assignment compatibility check
+            if (is2DIndex(relevantIndices[itag->index].keyPattern)) {
+                return Status(ErrorCodes::BadValue, "can't cache '2d' index");
+            }
+
             IndexEntry* ientry = new IndexEntry(relevantIndices[itag->index]);
             indexTree->entry.reset(ientry);
             indexTree->index_pos = itag->pos;
@@ -191,7 +203,6 @@ namespace mongo {
             PlanCacheIndexTree* indexTreeChild;
             Status s = cacheDataFromTaggedTree(taggedChild, relevantIndices, &indexTreeChild);
             if (!s.isOK()) {
-                *out = NULL;
                 return s;
             }
             indexTree->children.push_back(indexTreeChild);
@@ -250,15 +261,25 @@ namespace mongo {
                                        const QueryPlannerParams& params,
                                        CachedSolution* cachedSoln,
                                        QuerySolution** out) {
-        // TODO: Right now the plan cache does not cache a collscan. We
-        // should make it possible to cache a collscan as the best solution.
-        if (NULL == cachedSoln->plannerData.get()) {
+        verify(cachedSoln);
+        verify(out);
+        verify(PlanCache::shouldCacheQuery(query));
+
+        // Queries not suitable for caching are filtered
+        // in multi plan runner using PlanCache::shouldCacheQuery().
+
+        // Look up winning solution in cached solution's array.
+        size_t solutionIndex = cachedSoln->getWinnerIndex();
+
+        SolutionCacheData* cacheData = cachedSoln->plannerData[solutionIndex];
+
+        if (NULL == cacheData) {
             return Status(ErrorCodes::BadValue,
                           "planner data does not exist in the cached solution");
         }
 
-        SolutionCacheData* cacheData = cachedSoln->plannerData.get();
-        if (cacheData->wholeIXSoln) {
+        if (SolutionCacheData::WHOLE_IXSCAN_SOLN == cacheData->solnType) {
+            // The solution can be constructed by a scan over the entire index.
             QuerySolution* soln = buildWholeIXSoln(*cacheData->tree->entry,
                 query, params, cacheData->wholeIXSolnDir);
             if (soln == NULL) {
@@ -270,9 +291,22 @@ namespace mongo {
                 return Status::OK();
             }
         }
+        else if (SolutionCacheData::COLLSCAN_SOLN == cacheData->solnType) {
+            // The cached solution is a collection scan. We don't cache collscans
+            // with tailable==true, hence the false below.
+            QuerySolution* soln = buildCollscanSoln(query, false, params);
+            if (soln == NULL) {
+                return Status(ErrorCodes::BadValue, "plan cache error: collection scan soln");
+            }
+            else {
+                *out = soln;
+                return Status::OK();
+            }
+        }
 
-        // If we're here then this is not the 'wholeIXSoln' case, and we proceed
-        // by using the PlanCacheIndexTree to tag the query tree.
+        // SolutionCacheData::USE_TAGS_SOLN == cacheData->solnType
+        // If we're here then this is neither the whole index scan or collection scan
+        // cases, and we proceed by using the PlanCacheIndexTree to tag the query tree.
 
         // Create a copy of the expression tree.  We use cachedSoln to annotate this with indices.
         MatchExpression* clone = query.root()->shallowClone();
@@ -640,7 +674,7 @@ namespace mongo {
                 PlanCacheIndexTree* cacheData;
                 Status indexTreeStatus = cacheDataFromTaggedTree(clone.get(), relevantIndices, &cacheData);
                 if (!indexTreeStatus.isOK()) {
-                    warning() << "building the plan cache index tree failed" << endl;
+                    QLOG() << "Query is not cachable: " << indexTreeStatus.reason() << endl;
                 }
                 auto_ptr<PlanCacheIndexTree> autoData(cacheData);
 
@@ -711,7 +745,7 @@ namespace mongo {
                             indexTree->setIndexEntry(params.indices[i]);
                             SolutionCacheData* scd = new SolutionCacheData();
                             scd->tree.reset(indexTree);
-                            scd->wholeIXSoln = true;
+                            scd->solnType = SolutionCacheData::WHOLE_IXSCAN_SOLN;
                             scd->wholeIXSolnDir = 1;
 
                             soln->cacheData.reset(scd);
@@ -728,7 +762,7 @@ namespace mongo {
                             indexTree->setIndexEntry(params.indices[i]);
                             SolutionCacheData* scd = new SolutionCacheData();
                             scd->tree.reset(indexTree);
-                            scd->wholeIXSoln = true;
+                            scd->solnType = SolutionCacheData::WHOLE_IXSCAN_SOLN;
                             scd->wholeIXSolnDir = -1;
 
                             soln->cacheData.reset(scd);
@@ -749,6 +783,9 @@ namespace mongo {
         {
             QuerySolution* collscan = buildCollscanSoln(query, false, params);
             if (NULL != collscan) {
+                SolutionCacheData* scd = new SolutionCacheData();
+                scd->solnType = SolutionCacheData::COLLSCAN_SOLN;
+                collscan->cacheData.reset(scd);
                 out->push_back(collscan);
                 QLOG() << "Planner: outputting a collscan:\n";
                 QLOG() << collscan->toString() << endl;

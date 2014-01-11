@@ -8,6 +8,17 @@ chatty = function(s){
         print( s );
 }
 
+function reconnect(db) {
+    assert.soon(function() {
+                    try {
+                        db.runCommand({ping:1});
+                        return true;
+                    } catch (x) {
+                        return false;
+                    }
+                });
+};
+
 // Please consider using bsonWoCompare instead of this as much as possible.
 friendlyEqual = function( a , b ){
     if ( a == b )
@@ -229,13 +240,14 @@ if ( typeof _threadInject != "undefined" ){
                                    "jstests/opcounters.js",
                                    "jstests/currentop.js", // SERVER-8673, plus rwlock yielding issues
                                    "jstests/set_param1.js", // changes global state
-                                   "jstests/geo_update_btree2.js" // SERVER-11132 test disables table scans
+                                   "jstests/geo_update_btree2.js", // SERVER-11132 test disables table scans
+                                   // Test redefines DBCollection._validateForStorage
+                                   "jstests/update_replace.js",
                                   ] );
         
         // some tests can't be run in parallel with each other
         var serialTestsArr = [ "jstests/fsync.js",
                                "jstests/auth1.js",
-                               "jstests/auth_copydb2.js",
                                "jstests/connection_status.js",
                                "jstests/validate_user_documents.js"
 //                              ,"jstests/fsync2.js" // SERVER-4243

@@ -39,7 +39,7 @@ namespace mongo {
 
     static const string GEOSEARCHNAME = "geoHaystack";
 
-    HaystackAccessMethod::HaystackAccessMethod(BtreeInMemoryState* btreeState)
+    HaystackAccessMethod::HaystackAccessMethod(IndexCatalogEntry* btreeState)
         : BtreeBasedAccessMethod(btreeState) {
 
         const IndexDescriptor* descriptor = btreeState->descriptor();
@@ -182,7 +182,8 @@ namespace mongo {
                 unordered_set<DiskLoc, DiskLoc::Hasher> thisPass;
 
 
-                scoped_ptr<Runner> runner(InternalPlanner::indexScan(_descriptor, key, key, true));
+                scoped_ptr<Runner> runner(InternalPlanner::indexScan(_btreeState->collection(),
+                                                                     _descriptor, key, key, true));
                 Runner::RunnerState state;
                 DiskLoc loc;
                 while (Runner::RUNNER_ADVANCED == (state = runner->getNext(NULL, &loc))) {

@@ -46,6 +46,14 @@ namespace mongo {
     StatusWithMatchExpression MatchExpressionParser::_parseComparison( const char* name,
                                                                        ComparisonMatchExpression* cmp,
                                                                        const BSONElement& e ) {
+        // Non-equality comparison match expressions cannot have
+        // a regular expression as the argument (e.g. {a: {$gt: /b/}} is illegal).
+        if (MatchExpression::EQ != cmp->matchType() && RegEx == e.type()) {
+            std::stringstream ss;
+            ss << "Can't have RegEx as arg to predicate over field '" << name << "'.";
+            return StatusWithMatchExpression(Status(ErrorCodes::BadValue, ss.str()));
+        }
+
         std::auto_ptr<ComparisonMatchExpression> temp( cmp );
 
         Status s = temp->init( name, e );
@@ -84,6 +92,12 @@ namespace mongo {
         case BSONObj::GTE:
             return _parseComparison( name, new GTEMatchExpression(), e );
         case BSONObj::NE: {
+            if (RegEx == e.type()) {
+                // Just because $ne can be rewritten as the negation of an
+                // equality does not mean that $ne of a regex is allowed. See SERVER-1705.
+                return StatusWithMatchExpression(Status(ErrorCodes::BadValue,
+                                                        "Can't have regex as arg to $ne."));
+            }
             StatusWithMatchExpression s = _parseComparison( name, new EqualityMatchExpression(), e );
             if ( !s.isOK() )
                 return s;
@@ -605,6 +619,28 @@ namespace mongo {
                 temp->add( theAnd.getChild( i ) );
             }
             theAnd.clearAndRelease();
+
+            return StatusWithMatchExpression( temp.release() );
+        }
+
+        // DBRef value case
+        // A DBRef document under a $elemMatch should be treated as a value case
+        // with an implied $eq.
+
+        if ( _isDBRefDocument( obj ) ) {
+
+            std::auto_ptr<EqualityMatchExpression> eq( new EqualityMatchExpression() );
+            Status s = eq->init( "", e );
+            if ( !s.isOK() ) {
+                return StatusWithMatchExpression( s );
+            }
+
+            std::auto_ptr<ElemMatchValueMatchExpression> temp( new ElemMatchValueMatchExpression() );
+            s = temp->init( name );
+            if ( !s.isOK() )
+                return StatusWithMatchExpression( s );
+
+            temp->add( eq.release() );
 
             return StatusWithMatchExpression( temp.release() );
         }

@@ -41,41 +41,47 @@
 #include "mongo/db/query/query_planner_common.h"
 #include "mongo/db/query/single_solution_runner.h"
 #include "mongo/db/query/stage_builder.h"
-#include "mongo/db/server_options.h"
-#include "mongo/db/server_parameters.h"
 #include "mongo/s/d_logic.h"
 
 namespace mongo {
 
-    MONGO_EXPORT_SERVER_PARAMETER(enableIndexIntersection, bool, false);
-
-    // Copied verbatim from queryutil.cpp.
     static bool isSimpleIdQuery(const BSONObj& query) {
-        // Just one field name.
-        BSONObjIterator it(query);
-        if (!it.more()) { return false; }
+        bool hasID = false;
 
-        BSONElement elt = it.next();
-        if (it.more()) { return false; }
-
-        // Which is _id...
-        if (strcmp("_id", elt.fieldName()) != 0) {
+        // Must have _id field, and optionally can have either
+        // $isolated or $atomic.
+        if (query.nFields() > 2) {
             return false;
         }
 
-        // And not something like { _id : { $gt : ...
-        if (elt.isSimpleType()) { return true; }
+        BSONObjIterator it(query);
+        while (it.more()) {
+            BSONElement elt = it.next();
+            if (mongoutils::str::equals("_id", elt.fieldName())) {
+                // Verify that the query on _id is a simple equality.
+                hasID = true;
 
-        // BinData is OK too.
-        if (BinData == elt.type()) { return true; }
-
-        // And if the value is an object...
-        if (elt.type() == Object) {
-            // Can't do this.
-            return elt.Obj().firstElementFieldName()[0] != '$';
+                if (elt.type() == Object) {
+                    // If the value is an object, it can't have a query operator
+                    // (must be a literal object match).
+                    if (elt.Obj().firstElementFieldName()[0] == '$') {
+                        return false;
+                    }
+                }
+                else if (!elt.isSimpleType() && BinData != elt.type()) {
+                    // The _id fild cannot be something like { _id : { $gt : ...
+                    // But it can be BinData.
+                    return false;
+                }
+            }
+            else if (!(mongoutils::str::equals("$isolated", elt.fieldName()) ||
+                       mongoutils::str::equals("$atomic", elt.fieldName()))) {
+                // If the field is not _id, it must be $isolated/$atomic.
+                return false;
+            }
         }
 
-        return false;
+        return hasID;
     }
 
     static bool canUseIDHack(const CanonicalQuery& query) {
@@ -89,14 +95,26 @@ namespace mongo {
      * For a given query, get a runner.  The runner could be a SingleSolutionRunner, a
      * CachedQueryRunner, or a MultiPlanRunner, depending on the cache/query solver/etc.
      */
-    Status getRunner(CanonicalQuery* rawCanonicalQuery, Runner** out, size_t plannerOptions) {
+    Status getRunner(CanonicalQuery* rawCanonicalQuery,
+                     Runner** out, size_t plannerOptions) {
+        verify(rawCanonicalQuery);
+        Database* db = cc().database();
+        verify(db);
+        return getRunner(db->getCollection(rawCanonicalQuery->ns()),
+                         rawCanonicalQuery,
+                         out,
+                         plannerOptions);
+    }
+
+    /**
+     * For a given query, get a runner.  The runner could be a SingleSolutionRunner, a
+     * CachedQueryRunner, or a MultiPlanRunner, depending on the cache/query solver/etc.
+     */
+    Status getRunner(Collection* collection, CanonicalQuery* rawCanonicalQuery,
+                     Runner** out, size_t plannerOptions) {
+
         verify(rawCanonicalQuery);
         auto_ptr<CanonicalQuery> canonicalQuery(rawCanonicalQuery);
-
-        // Get the indices that we could possibly use.
-        Database* db = cc().database();
-        verify( db );
-        Collection* collection = db->getCollection( canonicalQuery->ns() );
 
         // This can happen as we're called by internal clients as well.
         if (NULL == collection) {
@@ -113,12 +131,17 @@ namespace mongo {
 
         // If it's not NULL, we may have indices.  Access the catalog and fill out IndexEntry(s)
         QueryPlannerParams plannerParams;
-        for (int i = 0; i < collection->getIndexCatalog()->numIndexesReady(); ++i) {
-            IndexDescriptor* desc = collection->getIndexCatalog()->getDescriptor( i );
-            plannerParams.indices.push_back(IndexEntry(desc->keyPattern(),
-                                                       desc->isMultikey(),
-                                                       desc->isSparse(),
-                                                       desc->indexName()));
+
+        {
+            IndexCatalog::IndexIterator ii = collection->getIndexCatalog()->getIndexIterator( false );
+            while ( ii.more() ) {
+                const IndexDescriptor* desc = ii.next();
+                plannerParams.indices.push_back(IndexEntry(desc->keyPattern(),
+                                                           desc->isMultikey(),
+                                                           desc->isSparse(),
+                                                           desc->indexName(),
+                                                           desc->infoObj()));
+            }
         }
 
         // Tailable: If the query requests tailable the collection must be capped.
@@ -172,22 +195,26 @@ namespace mongo {
 
         // Try to look up a cached solution for the query.
         //
-        // XXX: we don't want to do this if there is a hint or if max/min is set.
+        // Skip cache look up for non-cacheable queries.
+        // See PlanCache::shouldCacheQuery()
         //
         // TODO: Can the cache have negative data about a solution?
         CachedSolution* rawCS;
-        if (collection->infoCache()->getPlanCache()->get(*canonicalQuery, &rawCS).isOK()) {
+        if (PlanCache::shouldCacheQuery(*canonicalQuery) &&
+            collection->infoCache()->getPlanCache()->get(*canonicalQuery, &rawCS).isOK()) {
             // We have a CachedSolution.  Have the planner turn it into a QuerySolution.
             QuerySolution *qs;
             Status status = QueryPlanner::planFromCache(*canonicalQuery, plannerParams, rawCS, &qs);
             if (status.isOK()) {
-                // XXX: create new CachedSolutionRunner here.
+                WorkingSet* ws;
+                PlanStage* root;
+                verify(StageBuilder::build(*qs, &root, &ws));
+                *out = new CachedPlanRunner(canonicalQuery.release(), qs, root, ws);
+                return Status::OK();
             }
         }
 
-        if (enableIndexIntersection) {
-            plannerParams.options |= QueryPlannerParams::INDEX_INTERSECTION;
-        }
+        plannerParams.options |= QueryPlannerParams::INDEX_INTERSECTION;
 
         vector<QuerySolution*> solutions;
         Status status = QueryPlanner::plan(*canonicalQuery, plannerParams, &solutions);

@@ -28,28 +28,9 @@
 
 #pragma once
 
+#include "mongo/db/write_concern_options.h"
+
 namespace mongo {
-
-    struct WriteConcernOptions {
-
-        WriteConcernOptions() { reset(); }
-
-        Status parse( const BSONObj& obj );
-
-        void reset() {
-            syncMode = NONE;
-            wNumNodes = 0;
-            wMode = "";
-            wTimeout = 0;
-        }
-
-        enum SyncMode { NONE, FSYNC, JOURNAL } syncMode;
-
-        int wNumNodes;
-        string wMode;
-
-        int wTimeout;
-    };
 
     struct WriteConcernResult {
         WriteConcernResult() {

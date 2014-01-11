@@ -37,9 +37,11 @@
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/index_cursor.h"
 #include "mongo/db/index/index_descriptor.h"
-#include "mongo/db/structure/btree/state.h"
 
 namespace mongo {
+
+    class BtreeBulk;
+    class ExternalSortComparison;
 
     /**
      * Any access method that is Btree based subclasses from this.
@@ -52,7 +54,7 @@ namespace mongo {
     class BtreeBasedAccessMethod : public IndexAccessMethod {
         MONGO_DISALLOW_COPYING( BtreeBasedAccessMethod );
     public:
-        BtreeBasedAccessMethod( BtreeInMemoryState* btreeState );
+        BtreeBasedAccessMethod( IndexCatalogEntry* btreeState );
 
         virtual ~BtreeBasedAccessMethod() { }
 
@@ -76,6 +78,14 @@ namespace mongo {
 
         virtual Status newCursor(IndexCursor **out) const = 0;
 
+        virtual Status initializeAsEmpty();
+
+        virtual IndexAccessMethod* initiateBulk() ;
+
+        virtual Status commitBulk( IndexAccessMethod* bulk,
+                                   bool mayInterrupt,
+                                   std::set<DiskLoc>* dups );
+
         virtual Status touch(const BSONObj& obj);
 
         virtual Status validate(int64_t* numKeys);
@@ -83,16 +93,20 @@ namespace mongo {
         // XXX: consider migrating callers to use IndexCursor instead
         virtual DiskLoc findSingle( const BSONObj& key );
 
+        // exposed for testing, used for bulk commit
+        static ExternalSortComparison* getComparison(int version,
+                                                     const BSONObj& keyPattern);
+
     protected:
         // Friends who need getKeys.
-        friend class BtreeBasedBuilder;
+        friend class BtreeBulk;
 
         // See below for body.
         class BtreeBasedPrivateUpdateData;
 
         virtual void getKeys(const BSONObj &obj, BSONObjSet *keys) = 0;
 
-        scoped_ptr<BtreeInMemoryState> _btreeState; // OWNED HERE
+        IndexCatalogEntry* _btreeState; // owned by IndexCatalogEntry
         const IndexDescriptor* _descriptor;
 
         // There are 2 types of Btree disk formats.  We put them both behind one interface.

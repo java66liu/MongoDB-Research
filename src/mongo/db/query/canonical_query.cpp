@@ -30,6 +30,7 @@
 
 #include "mongo/db/jsobj.h"
 #include "mongo/db/matcher/expression_parser.h"
+#include "mongo/db/query/query_planner_common.h"
 
 namespace mongo {
 
@@ -111,10 +112,8 @@ namespace mongo {
         return Status::OK();
     }
 
-    /**
-     * Returns the normalized version of the subtree rooted at 'root'.
-     */
-    MatchExpression* normalizeTree(MatchExpression* root) {
+    // static
+    MatchExpression* CanonicalQuery::normalizeTree(MatchExpression* root) {
         // root->isLogical() is true now.  We care about AND and OR.  Negations currently scare us.
         if (MatchExpression::AND == root->matchType() || MatchExpression::OR == root->matchType()) {
             // We could have AND of AND of AND.  Make sure we clean up our children before merging
@@ -163,31 +162,6 @@ namespace mongo {
         return root;
     }
 
-    // TODO: Should this really live in the parsing?  Or elsewhere?
-    Status argsValid(MatchExpression* root) {
-        MatchExpression::MatchType type = root->matchType();
-
-        if (MatchExpression::GT == type || MatchExpression::GTE == type
-            || MatchExpression::LT == type || MatchExpression::LTE == type) {
-
-            ComparisonMatchExpression* cme = static_cast<ComparisonMatchExpression*>(root);
-            BSONElement data = cme->getData();
-            if (RegEx == data.type()) {
-                return Status(ErrorCodes::BadValue,
-                              "Can't have RegEx as arg to pred " + cme->toString());
-            }
-        }
-
-        for (size_t i = 0; i < root->numChildren(); ++i) {
-            Status s = argsValid(root->getChild(i));
-            if (!s.isOK()) {
-                return s;
-            }
-        }
-
-        return Status::OK();
-    }
-
     size_t countNodes(MatchExpression* root, MatchExpression::MatchType type) {
         size_t sum = 0;
         if (type == root->matchType()) {
@@ -199,43 +173,70 @@ namespace mongo {
         return sum;
     }
 
-    // TODO: Move this to query_validator.cpp
-    Status isValid(MatchExpression* root) {
-        // TODO: This should really be done as part of type checking in the parser.
-        Status argStatus = argsValid(root);
-        if (!argStatus.isOK()) {
-            return argStatus;
+    /**
+     * Does 'root' have a subtree of type 'subtreeType' with a node of type 'childType' inside?
+     */
+    bool hasNodeInSubtree(MatchExpression* root, MatchExpression::MatchType childType,
+                          MatchExpression::MatchType subtreeType) {
+        if (subtreeType == root->matchType()) {
+            return QueryPlannerCommon::hasNode(root, childType);
         }
+        for (size_t i = 0; i < root->numChildren(); ++i) {
+            if (hasNodeInSubtree(root->getChild(i), childType, subtreeType)) {
+                return true;
+            }
+        }
+        return false;
+    }
 
+    // static
+    Status CanonicalQuery::isValid(MatchExpression* root) {
         // Analysis below should be done after squashing the tree to make it clearer.
 
-        // TODO: We want $text in root level or within rooted AND for consistent text score
-        // availability.
+        // There can only be one TEXT.  If there is a TEXT, it cannot appear inside a NOR.
+        //
+        // Note that the query grammar (as enforced by the MatchExpression parser) forbids TEXT
+        // inside of value-expression clauses like NOT, so we don't check those here.
+        size_t numText = countNodes(root, MatchExpression::TEXT);
+        if (numText > 1) {
+            return Status(ErrorCodes::BadValue, "Too many text expressions");
+        }
+        else if (1 == numText) {
+            if (hasNodeInSubtree(root, MatchExpression::TEXT, MatchExpression::NOR)) {
+                return Status(ErrorCodes::BadValue, "text expression not allowed in nor");
+            }
+        }
 
         // There can only be one NEAR.  If there is a NEAR, it must be either the root or the root
         // must be an AND and its child must be a NEAR.
         size_t numGeoNear = countNodes(root, MatchExpression::GEO_NEAR);
-
-        if (0 == numGeoNear) {
-            return Status::OK();
-        }
-
         if (numGeoNear > 1) {
             return Status(ErrorCodes::BadValue, "Too many geoNear expressions");
         }
-
-        if (MatchExpression::GEO_NEAR == root->matchType()) {
-            return Status::OK();
-        }
-        else if (MatchExpression::AND == root->matchType()) {
-            for (size_t i = 0; i < root->numChildren(); ++i) {
-                if (MatchExpression::GEO_NEAR == root->getChild(i)->matchType()) {
-                    return Status::OK();
+        else if (1 == numGeoNear) {
+            bool topLevel = false;
+            if (MatchExpression::GEO_NEAR == root->matchType()) {
+                topLevel = true;
+            }
+            else if (MatchExpression::AND == root->matchType()) {
+                for (size_t i = 0; i < root->numChildren(); ++i) {
+                    if (MatchExpression::GEO_NEAR == root->getChild(i)->matchType()) {
+                        topLevel = true;
+                        break;
+                    }
                 }
+            }
+            if (!topLevel) {
+                return Status(ErrorCodes::BadValue, "geoNear must be top-level expr");
             }
         }
 
-        return Status(ErrorCodes::BadValue, "geoNear must be top-level expr");
+        // TEXT and NEAR cannot both be in the query.
+        if (numText > 0 && numGeoNear > 0) {
+            return Status(ErrorCodes::BadValue, "text and geoNear not allowed in same query");
+        }
+
+        return Status::OK();
     }
 
     Status CanonicalQuery::init(LiteParsedQuery* lpq) {

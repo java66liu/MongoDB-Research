@@ -154,18 +154,10 @@ namespace mongo {
                 BSONObj tmp = i.nextSafe();
 
                 /* assure object is valid.  note this will slow us down a little. */
-                if ( !tmp.valid() ) {
-                    stringstream ss;
-                    ss << "Cloner: skipping corrupt object from " << from_collection;
-                    BSONElement e = tmp.firstElement();
-                    try {
-                        e.validate();
-                        ss << " firstElement: " << e;
-                    }
-                    catch( ... ) {
-                        ss << " firstElement corrupt";
-                    }
-                    out() << ss.str() << endl;
+                const Status status = validateBSON(tmp.objdata(), tmp.objsize());
+                if (!status.isOK()) {
+                    out() << "Cloner: skipping corrupt object from " << from_collection
+                          << ": " << status.reason();
                     continue;
                 }
 
@@ -714,7 +706,6 @@ namespace mongo {
 
     /* Usage:
        admindb.$cmd.findOne( { copydb: 1, fromhost: <hostname>, fromdb: <db>, todb: <db>[, username: <username>, nonce: <nonce>, key: <key>] } );
-       Note: doesn't work with authentication enabled, except as old-style users.
     */
     class CmdCopyDb : public Command {
     public:
@@ -783,7 +774,9 @@ namespace mongo {
                 }
                 cloner.setConnection( authConn_.release() );
             }
-            else {
+            else if (!fromSelf) {
+                // If fromSelf leave the cloner's conn empty, it will use a DBDirectClient instead.
+
                 DBClientConnection* conn = new DBClientConnection();
                 cloner.setConnection(conn);
                 if (!conn->connect(fromhost, errmsg)) {

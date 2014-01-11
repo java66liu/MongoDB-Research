@@ -110,14 +110,6 @@ namespace mongo {
 
     MONGO_FP_DECLARE(rsStopGetMore);
 
-    void BSONElementManipulator::initTimestamp() {
-        massert( 10332 ,  "Expected CurrentTime type", _element.type() == Timestamp );
-        unsigned long long &timestamp = *( reinterpret_cast< unsigned long long* >( value() ) );
-        if ( timestamp == 0 ) {
-            mutex::scoped_lock lk(OpTime::m);
-            timestamp = OpTime::now(lk).asDate();
-        }
-    }
     void BSONElementManipulator::SetNumber(double d) {
         if ( _element.type() == NumberDouble )
             *getDur().writing( reinterpret_cast< double * >( value() )  ) = d;
@@ -132,17 +124,6 @@ namespace mongo {
     void BSONElementManipulator::SetInt(int n) {
         verify( _element.type() == NumberInt );
         getDur().writingInt( *reinterpret_cast< int * >( value() ) ) = n;
-    }
-    /* dur:: version */
-    void BSONElementManipulator::ReplaceTypeAndValue( const BSONElement &e ) {
-        char *d = data();
-        char *v = value();
-        int valsize = e.valuesize();
-        int ofs = (int) (v-d);
-        dassert( ofs > 0 );
-        char *p = (char *) getDur().writingPtr(d, valsize + ofs);
-        *p = e.type();
-        memcpy( p + ofs, e.value(), valsize );
     }
 
     void inProgCmd( Message &m, DbResponse &dbresponse ) {
@@ -1067,7 +1048,7 @@ namespace {
         Lock::DBRead lk( ns );
         string errmsg;
         int errCode;
-        long long res = runCount( ns.c_str() , _countCmd( ns , query , options , limit , skip ) , errmsg, errCode );
+        long long res = runCount( ns, _countCmd( ns , query , options , limit , skip ) , errmsg, errCode );
         if ( res == -1 ) {
             // namespace doesn't exist
             return 0;
@@ -1240,7 +1221,7 @@ namespace {
             return;
         }
 #endif
-        tryToOutputFatal( "dbexit: really exiting now" );
+        tryToOutputFatal( "dbexit: really exiting now\n" );
         if ( c ) c->shutdown();
         ::_exit(rc);
     }

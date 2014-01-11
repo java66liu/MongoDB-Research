@@ -1,24 +1,9 @@
 // This test checks validation of the replaced doc (on the server) for dots, $prefix and _id
 
-/**
- * Collection "class" that disables client side checks so we can test the server.
- */
-var MyCollection = function(mongo, db, shortName, fullName) {
-    this._mongo = mongo;
-    this._db = db;
-    this._shortName = shortName;
-    this._fullName = fullName;
-};
+var origValidateFunc = DBCollection._validateForStorage;
+DBCollection._validateForStorage = function() {};
 
-// Technique adopted from "Javascript Patterns" by Stoyan Stefanov
-// Classical Pattern #5 - A Temporary Constructor
-var Proxy = function() {};
-Proxy.prototype = DBCollection.prototype;
-MyCollection.prototype = new Proxy();
-MyCollection.prototype._validateForStorage = function() {};
-
-var shortName = 'jstests_update_replace';
-var t = new MyCollection(db.getMongo(), db, shortName, db.getName() + '.' + shortName);
+var t = db.jstests_update_replace;
 t.drop();
 
 // Should not allow "." in field names
@@ -58,3 +43,6 @@ assert.gleSuccess(db, "embedded _id array");
 // This is fine since _id isn't a top level field
 t.save({b:1, a :{ _id: [9]}})
 assert.gleSuccess(db, "b embedded _id array");
+
+DBCollection._validateForStorage = origValidateFunc;
+
