@@ -93,70 +93,121 @@ namespace mongo {
                  << "  { w:'majority' } - await replication to majority of set\n"
                  << "  { wtimeout:m} - timeout for w in m milliseconds";
         }
-        bool run(const string& dbname, BSONObj& _cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+
+        bool run( const string& dbname,
+                  BSONObj& cmdObj,
+                  int,
+                  string& errmsg,
+                  BSONObjBuilder& result,
+                  bool fromRepl ) {
+
+            //
+            // Correct behavior here is very finicky.
+            //
+            // 1.  The first step is to append the error that occurred on the previous operation.
+            // This adds an "err" field to the command, which is *not* the command failing.
+            //
+            // 2.  Next we parse and validate write concern options.  If these options are invalid
+            // the command fails no matter what, even if we actually had an error earlier.  The
+            // reason for checking here is to match legacy behavior on these kind of failures -
+            // we'll still get an "err" field for the write error.
+            //
+            // 3.  If we had an error on the previous operation, we then return immediately.
+            //
+            // 4.  Finally, we actually enforce the write concern.  All errors *except* timeout are
+            // reported with ok : 0.0, to match legacy behavior.
+            //
+            // There is a special case when "wOpTime" is explicitly provided by the user - in this
+            // we *only* enforce the write concern if it is valid.
+            //
+            // We always need to either report "err" (if ok : 1) or "errmsg" (if ok : 0), even if
+            // err is null.
+            //
+
             LastError *le = lastError.disableForCommand();
 
-            bool errorOccured = false;
-            if ( le->nPrev != 1 ) {
-                errorOccured = LastError::noError.appendSelf( result , false );
-                le->appendSelfStatus( result );
-            }
-            else {
-                errorOccured = le->appendSelf( result , false );
-            }
-
+            // Always append lastOp and connectionId
             Client& c = cc();
             c.appendLastOp( result );
 
-            result.appendNumber( "connectionId" , c.getConnectionId() ); // for sharding; also useful in general for debugging
+            // for sharding; also useful in general for debugging
+            result.appendNumber( "connectionId" , c.getConnectionId() );
 
-            BSONObj cmdObj = _cmdObj;
-            {
-                BSONObj::iterator i(_cmdObj);
-                i.next();
-                if( !i.more() ) {
-                    /* empty, use default */
-                    BSONObj *def = getLastErrorDefault;
-                    if( def )
-                        cmdObj = *def;
+            bool errorOccurred = false;
+            BSONObj writeConcernDoc = cmdObj;
+
+            // Errors aren't reported when wOpTime is used
+            if ( cmdObj["wOpTime"].eoo() ) {
+                if ( le->nPrev != 1 ) {
+                    errorOccurred = LastError::noError.appendSelf( result, false );
+                    le->appendSelfStatus( result );
+                }
+                else {
+                    errorOccurred = le->appendSelf( result, false );
                 }
             }
 
-            WriteConcernOptions writeConcern;
-            Status status = writeConcern.parse( cmdObj );
-            if ( !status.isOK() ) {
-                result.append( "badGLE", cmdObj );
-                errmsg = status.toString();
-                return false;
+            // Use the default options if we have no gle options aside from wOpTime
+            bool useDefaultGLEOptions = cmdObj.nFields() == 1
+                                        || ( cmdObj.nFields() == 2 && !cmdObj["wOpTime"].eoo() );
+
+            if ( useDefaultGLEOptions && getLastErrorDefault ) {
+                writeConcernDoc = *getLastErrorDefault;
             }
 
-            // Get the wOpTime from the GLE if it exists
+            //
+            // Validate write concern no matter what, this matches 2.4 behavior
+            //
+
+            WriteConcernOptions writeConcern;
+            Status status = writeConcern.parse( writeConcernDoc );
+
+            if ( status.isOK() ) {
+                // Ensure options are valid for this host
+                status = validateWriteConcern( writeConcern );
+            }
+
+            if ( !status.isOK() ) {
+                result.append( "badGLE", writeConcernDoc );
+                return appendCommandStatus( result, status );
+            }
+
+            // Don't wait for replication if there was an error reported - this matches 2.4 behavior
+            if ( errorOccurred ) {
+                dassert( cmdObj["wOpTime"].eoo() );
+                return true;
+            }
+
             OpTime wOpTime;
             if ( cmdObj["wOpTime"].type() == Timestamp ) {
+                // Get the wOpTime from the command if it exists
                 wOpTime = OpTime( cmdObj["wOpTime"].date() );
             }
-            if ( wOpTime.isNull() ) {
+            else {
                 // Use the client opTime if no wOpTime is specified
                 wOpTime = cc().getLastOp();
             }
 
             cc().curop()->setMessage( "waiting for write concern" );
 
-            WriteConcernResult res;
-            status = waitForWriteConcern( writeConcern, wOpTime, &res );
+            WriteConcernResult wcResult;
+            status = waitForWriteConcern( writeConcern, wOpTime, &wcResult );
+            wcResult.appendTo( &result );
 
-            if ( !errorOccured ) {
-                // Error information fields from write concern can clash with the error from the
-                // actual write, so don't append if an error occurred on the previous operation.
-                // Note: In v2.4, the server only waits for the journal commmit or fsync and does
-                // not wait for replication when an error occurred on the previous operation.
-                res.appendTo( &result );
-            }
-
-            if ( status.code() == ErrorCodes::WriteConcernLegacyOK ) {
-                result.append( "wnote", status.toString() );
+            // For backward compatibility with 2.4, wtimeout returns ok : 1.0
+            if ( wcResult.wTimedOut ) {
+                dassert( !wcResult.err.empty() ); // so we always report err
+                dassert( !status.isOK() );
+                result.append( "errmsg", "timed out waiting for slaves" );
+                result.append( "code", status.code() );
                 return true;
             }
+
+            // Always need an err field appended
+            dassert( wcResult.err.empty() );
+            if ( !errorOccurred )
+                result.appendNull( "err" );
+
             return appendCommandStatus( result, status );
         }
 

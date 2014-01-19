@@ -1093,12 +1093,14 @@ namespace mongo {
         bool run(const string& dbname, BSONObj& jsobj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
             string ns = dbname + "." + jsobj.firstElement().valuestr();
             Client::Context ctx( ns );
-            NamespaceDetails* nsd = nsdetails( ns );
+
             Collection* coll = ctx.db()->getCollection( ns );
-            if ( ! nsd ) {
+            if ( !coll ) {
                 errmsg = "ns does not exist";
                 return false;
             }
+
+            NamespaceDetails* nsd = coll->details();
 
             bool ok = true;
 
@@ -1435,6 +1437,8 @@ namespace mongo {
         if ( c->adminOnly() ) {
             LOG( 2 ) << "command: " << cmdObj << endl;
         }
+
+        client.curop()->setCommand(c);
 
         if (c->maintenanceMode() && theReplSet) {
             mmSetter.reset(new MaintenanceModeSetter());

@@ -38,14 +38,13 @@
 #pragma once
 
 #include "mongo/db/client.h"
-#include "mongo/db/database.h"
+#include "mongo/db/catalog/database.h"
 #include "mongo/db/diskloc.h"
 #include "mongo/db/jsobjmanipulator.h"
-#include "mongo/db/memconcept.h"
 #include "mongo/db/storage/data_file.h"
 #include "mongo/db/storage/durable_mapped_file.h"
 #include "mongo/db/storage/extent.h"
-#include "mongo/db/namespace_details-inl.h"
+#include "mongo/db/structure/catalog/namespace_details-inl.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pdfile_version.h"
 #include "mongo/platform/cstdint.h"
@@ -71,7 +70,6 @@ namespace mongo {
     inline NamespaceIndex* nsindex(const StringData& ns) {
         Database *database = cc().database();
         verify( database );
-        memconcept::is(database, memconcept::concept::database, ns, sizeof(Database));
         DEV {
             StringData dbname = nsToDatabaseSubstring( ns );
             if ( database->name() != dbname ) {
@@ -86,11 +84,7 @@ namespace mongo {
 
     inline NamespaceDetails* nsdetails(const StringData& ns) {
         // if this faults, did you set the current db first?  (Client::Context + dblock)
-        NamespaceDetails *d = nsindex(ns)->details(ns);
-        if( d ) {
-            memconcept::is(d, memconcept::concept::nsdetails, ns, sizeof(NamespaceDetails));
-        }
-        return d;
+        return nsindex(ns)->details(ns);
     }
 
     BOOST_STATIC_ASSERT( 16 == sizeof(DeletedRecord) );

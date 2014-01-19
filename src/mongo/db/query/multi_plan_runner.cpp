@@ -29,7 +29,7 @@
 #include "mongo/db/query/multi_plan_runner.h"
 
 #include "mongo/db/client.h"
-#include "mongo/db/database.h"
+#include "mongo/db/catalog/database.h"
 #include "mongo/db/diskloc.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/exec/plan_stage.h"
@@ -42,7 +42,7 @@
 #include "mongo/db/query/qlog.h"
 #include "mongo/db/query/query_solution.h"
 #include "mongo/db/query/type_explain.h"
-#include "mongo/db/structure/collection.h"
+#include "mongo/db/catalog/collection.h"
 
 namespace mongo {
 
@@ -132,11 +132,11 @@ namespace mongo {
         }
     }
 
-    void MultiPlanRunner::invalidate(const DiskLoc& dl) {
+    void MultiPlanRunner::invalidate(const DiskLoc& dl, InvalidationType type) {
         if (_failure || _killed) { return; }
 
         if (NULL != _bestPlan) {
-            _bestPlan->invalidate(dl);
+            _bestPlan->invalidate(dl, type);
             for (list<WorkingSetID>::iterator it = _alreadyProduced.begin();
                  it != _alreadyProduced.end();) {
                 WorkingSetMember* member = _bestPlan->getWorkingSet()->get(*it);
@@ -153,7 +153,7 @@ namespace mongo {
                 }
             }
             if (NULL != _backupPlan) {
-                _backupPlan->invalidate(dl);
+                _backupPlan->invalidate(dl, type);
                 for (list<WorkingSetID>::iterator it = _backupAlreadyProduced.begin();
                         it != _backupAlreadyProduced.end();) {
                     WorkingSetMember* member = _backupPlan->getWorkingSet()->get(*it);
@@ -173,7 +173,7 @@ namespace mongo {
         }
         else {
             for (size_t i = 0; i < _candidates.size(); ++i) {
-                _candidates[i].root->invalidate(dl);
+                _candidates[i].root->invalidate(dl, type);
                 for (list<WorkingSetID>::iterator it = _candidates[i].results.begin();
                      it != _candidates[i].results.end();) {
                     WorkingSetMember* member = _candidates[i].ws->get(*it);
@@ -223,17 +223,21 @@ namespace mongo {
             }
         }
 
-        if (!_alreadyProduced.empty()) {
+        // Look for an already produced result that provides the data the caller wants.
+        while (!_alreadyProduced.empty()) {
             WorkingSetID id = _alreadyProduced.front();
             _alreadyProduced.pop_front();
 
             WorkingSetMember* member = _bestPlan->getWorkingSet()->get(id);
+
             // Note that this copies code from PlanExecutor.
             if (NULL != objOut) {
                 if (WorkingSetMember::LOC_AND_IDX == member->state) {
                     if (1 != member->keyData.size()) {
                         _bestPlan->getWorkingSet()->free(id);
-                        return Runner::RUNNER_ERROR;
+                        // If the caller needs the key data and the WSM doesn't have it, drop the
+                        // result and carry on.
+                        continue;
                     }
                     *objOut = member->keyData[0].keyData;
                 }
@@ -241,9 +245,10 @@ namespace mongo {
                     *objOut = member->obj;
                 }
                 else {
-                    // TODO: Checking the WSM for covered fields goes here.
+                    // If the caller needs an object and the WSM doesn't have it, drop and
+                    // try the next result.
                     _bestPlan->getWorkingSet()->free(id);
-                    return Runner::RUNNER_ERROR;
+                    continue;
                 }
             }
 
@@ -252,10 +257,14 @@ namespace mongo {
                     *dlOut = member->loc;
                 }
                 else {
+                    // If the caller needs a DiskLoc and the WSM doesn't have it, drop and carry on.
                     _bestPlan->getWorkingSet()->free(id);
-                    return Runner::RUNNER_ERROR;
+                    continue;
                 }
             }
+
+            // If we're here, the caller has all the data needed and we've set the out
+            // parameters.  Remove the result from the WorkingSet.
             _bestPlan->getWorkingSet()->free(id);
             return Runner::RUNNER_ADVANCED;
         }
@@ -276,7 +285,7 @@ namespace mongo {
             Collection* collection = db->getCollection(_query->ns());
             verify(NULL != collection);
             PlanCache* cache = collection->infoCache()->getPlanCache();
-            cache->remove(PlanCache::getPlanCacheKey(*_query));
+            cache->remove(*_query);
 
             _bestPlan.reset(_backupPlan);
             _backupPlan = NULL;
@@ -528,8 +537,8 @@ namespace mongo {
 
         (*explain)->addToAllPlans(chosenPlan); // ownership xfer
 
-        uint64_t nScannedObjectsAllPlans = chosenPlan->getNScannedObjects();
-        uint64_t nScannedAllPlans = chosenPlan->getNScanned();
+        size_t nScannedObjectsAllPlans = chosenPlan->getNScannedObjects();
+        size_t nScannedAllPlans = chosenPlan->getNScanned();
         for (std::vector<PlanStageStats*>::const_iterator it = _candidateStats.begin();
              it != _candidateStats.end();
              ++it) {

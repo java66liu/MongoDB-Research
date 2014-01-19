@@ -33,10 +33,10 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/client.h"
 #include "mongo/db/diskloc.h"
-#include "mongo/db/namespace_details.h"
+#include "mongo/db/structure/catalog/namespace_details.h"
 #include "mongo/db/pdfile.h"
 #include "mongo/db/repl/oplogreader.h"
-#include "mongo/db/structure/collection.h"
+#include "mongo/db/catalog/collection.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/log.h"
 
@@ -51,8 +51,8 @@ namespace mongo {
         const char *ns = o.getStringField("ns");
 
         // capped collections
-        NamespaceDetails *nsd = nsdetails(ns);
-        if ( nsd && nsd->isCapped() ) {
+        Collection* collection = cc().database()->getCollection(ns);
+        if ( collection && collection->isCapped() ) {
             log() << "replication missing doc, but this is okay for a capped collection (" << ns << ")" << endl;
             return BSONObj();
         }

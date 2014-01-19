@@ -45,8 +45,8 @@
 #include "mongo/db/exec/skip.h"
 #include "mongo/db/exec/text.h"
 #include "mongo/db/index/fts_access_method.h"
-#include "mongo/db/namespace_details.h"
-#include "mongo/db/structure/collection.h"
+#include "mongo/db/structure/catalog/namespace_details.h"
+#include "mongo/db/catalog/collection.h"
 
 namespace mongo {
 
@@ -88,7 +88,6 @@ namespace mongo {
 
             params.bounds = ixn->bounds;
             params.direction = ixn->direction;
-            params.limit = ixn->limit;
             params.maxScan = ixn->maxScan;
             params.addKeyMetadata = ixn->addKeyMetadata;
             return new IndexScan(params, ws, ixn->filter.get());
@@ -254,9 +253,10 @@ namespace mongo {
             return new ShardFilterStage(shardingState.getCollectionMetadata(qsol.ns), ws, childStage);
         }
         else {
-            stringstream ss;
+            mongoutils::str::stream ss;
             root->appendToString(&ss, 0);
-            warning() << "Could not build exec tree for node " << ss.str() << endl;
+            string nodeStr(ss);
+            warning() << "Could not build exec tree for node " << nodeStr << endl;
             return NULL;
         }
     }

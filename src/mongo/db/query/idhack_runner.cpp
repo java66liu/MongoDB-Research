@@ -39,7 +39,7 @@
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/type_explain.h"
 #include "mongo/db/query/plan_executor.h"
-#include "mongo/db/structure/collection.h"
+#include "mongo/db/catalog/collection.h"
 #include "mongo/s/d_logic.h"
 
 namespace mongo {
@@ -66,7 +66,9 @@ namespace mongo {
             return Runner::RUNNER_EOF;
         }
 
-        BtreeBasedAccessMethod* accessMethod = catalog->getBtreeBasedIndex( idDesc );
+        // XXX: This may not be valid always.  See SERVER-12397.
+        BtreeBasedAccessMethod* accessMethod =
+            static_cast<BtreeBasedAccessMethod*>(catalog->getIndex(idDesc));
 
         BSONObj key = _query->getQueryObj()["_id"].wrap();
 
@@ -147,9 +149,9 @@ namespace mongo {
     }
 
     // Nothing to do here, holding no state.
-    void IDHackRunner::invalidate(const DiskLoc& dl) {
+    void IDHackRunner::invalidate(const DiskLoc& dl, InvalidationType type) {
         if (_done || _killed) { return; }
-        if (_locFetching == dl) {
+        if (_locFetching == dl && (type == INVALIDATION_DELETION)) {
             _locFetching = DiskLoc();
             _killed = true;
         }

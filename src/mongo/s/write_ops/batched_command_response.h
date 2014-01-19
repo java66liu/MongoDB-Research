@@ -57,11 +57,11 @@ namespace mongo {
         static const BSONField<int> errCode;
         static const BSONField<string> errMessage;
         static const BSONField<long long> n;
-        static const BSONField<long long> nDocsModified;
+        static const BSONField<long long> nModified;
         static const BSONField<std::vector<BatchedUpsertDetail*> > upsertDetails;
         static const BSONField<OpTime> lastOp;
         static const BSONField<std::vector<WriteErrorDetail*> > writeErrors;
-        static const BSONField<BSONObj> writeConcernError;
+        static const BSONField<WCErrorDetail*> writeConcernError;
 
         //
         // construction / destruction
@@ -102,10 +102,10 @@ namespace mongo {
         bool isErrMessageSet() const;
         const std::string& getErrMessage() const;
 
-        void setNDocsModified(long long n);
-        void unsetNDocsModified();
-        bool isNDocsModified() const;
-        long long getNDocsModified() const;
+        void setNModified(long long n);
+        void unsetNModified();
+        bool isNModified() const;
+        long long getNModified() const;
 
         void setN(long long n);
         void unsetN();
@@ -134,7 +134,7 @@ namespace mongo {
         const std::vector<WriteErrorDetail*>& getErrDetails() const;
         const WriteErrorDetail* getErrDetailsAt(std::size_t pos) const;
 
-        void setWriteConcernError(const WCErrorDetail& error);
+        void setWriteConcernError(WCErrorDetail* error);
         void unsetWriteConcernError();
         bool isWriteConcernErrorSet() const;
         const WCErrorDetail* getWriteConcernError() const;
@@ -159,8 +159,8 @@ namespace mongo {
         bool _isNSet;
 
         // (O)  number of documents updated
-        long long _nDocsModified;
-        bool _isNDocsModifiedSet;
+        long long _nModified;
+        bool _isNModifiedSet;
 
         // (O)  "promoted" _upserted, if the corresponding request contained only one batch item
         //      Should only be present if _upserted is not.

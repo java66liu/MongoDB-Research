@@ -44,7 +44,7 @@
 #include "mongo/db/index/fts_access_method.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/matcher/expression_parser.h"
-#include "mongo/db/namespace_details.h"
+#include "mongo/db/structure/catalog/namespace_details.h"
 #include "mongo/db/pdfile.h"
 #include "mongo/db/query/plan_executor.h"
 
@@ -93,7 +93,7 @@ namespace mongo {
         virtual LockType locktype() const { return READ; }
         bool slaveOk() const { return true; }
         bool slaveOverrideOk() const { return true; }
-        void help(stringstream& h) const { }
+        void help(std::stringstream& h) const { }
 
         virtual void addRequiredPrivileges(const std::string& dbname,
                                            const BSONObj& cmdObj,
@@ -187,8 +187,6 @@ namespace mongo {
                 params.bounds.endKey = nodeArgs["endKey"].Obj();
                 params.bounds.endKeyInclusive = nodeArgs["endKeyInclusive"].Bool();
                 params.direction = nodeArgs["direction"].numberInt();
-                params.limit = nodeArgs["limit"].numberInt();
-                params.forceBtreeAccessMethod = false;
 
                 return new IndexScan(params, workingSet, matcher);
             }
@@ -295,7 +293,7 @@ namespace mongo {
                 // What collection?
                 params.ns = dbname + "." + nodeArgs["name"].String();
                 uassert(16962, "Can't find collection " + nodeArgs["name"].String(),
-                        NULL != nsdetails(params.ns));
+                        NULL != cc().database()->getCollection(params.ns));
 
                 // What direction?
                 uassert(16963, "Direction argument must be specified and be a number",

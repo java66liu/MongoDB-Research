@@ -34,7 +34,7 @@
 #include <boost/shared_ptr.hpp>
 
 #include "mongo/client/dbclientcursor.h"
-#include "mongo/db/database.h"
+#include "mongo/db/catalog/database.h"
 #include "mongo/db/exec/and_hash.h"
 #include "mongo/db/exec/and_sorted.h"
 #include "mongo/db/exec/index_scan.h"
@@ -43,7 +43,7 @@
 #include "mongo/db/json.h"
 #include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/pdfile.h"
-#include "mongo/db/structure/collection.h"
+#include "mongo/db/catalog/collection.h"
 #include "mongo/db/structure/collection_iterator.h"
 #include "mongo/dbtests/dbtests.h"
 
@@ -164,7 +164,7 @@ namespace QueryStageAnd {
             getLocs(&data, coll);
             for (set<DiskLoc>::const_iterator it = data.begin(); it != data.end(); ++it) {
                 if (it->obj()["foo"].numberInt() == 15) {
-                    ah->invalidate(*it);
+                    ah->invalidate(*it, INVALIDATION_DELETION);
                     remove(it->obj());
                     break;
                 }
@@ -456,7 +456,7 @@ namespace QueryStageAnd {
             // very first insert, which should be the very first thing in data.  Let's invalidate it
             // and make sure it shows up in the flagged results.
             ah->prepareToYield();
-            ah->invalidate(*data.begin());
+            ah->invalidate(*data.begin(), INVALIDATION_DELETION);
             remove(data.begin()->obj());
             ah->recoverFromYield();
 
@@ -495,7 +495,7 @@ namespace QueryStageAnd {
             // Remove a result that's coming up.  It's not the 'target' result of the AND so it's
             // not flagged.
             ah->prepareToYield();
-            ah->invalidate(*it);
+            ah->invalidate(*it, INVALIDATION_DELETION);
             remove(it->obj());
             ah->recoverFromYield();
 

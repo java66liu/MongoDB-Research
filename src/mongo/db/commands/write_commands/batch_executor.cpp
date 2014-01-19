@@ -66,31 +66,17 @@ namespace mongo {
         _stats( new WriteBatchStats ) {
     }
 
-    static bool buildWCError( const Status& wcStatus,
-                              const WriteConcernResult& wcResult,
-                              WCErrorDetail* wcError ) {
+    static WCErrorDetail* toWriteConcernError( const Status& wcStatus,
+                                               const WriteConcernResult& wcResult ) {
 
-        // Error reported is either the errmsg or err from wc
-        string errMsg;
-        if ( !wcStatus.isOK() )
-            errMsg = wcStatus.toString();
-        else if ( wcResult.err.size() )
-            errMsg = wcResult.err;
+        WCErrorDetail* wcError = new WCErrorDetail;
 
-        if ( errMsg.empty() )
-            return false;
-
-        if ( wcStatus.isOK() )
-            wcError->setErrCode( ErrorCodes::WriteConcernFailed );
-        else
-            wcError->setErrCode( wcStatus.code() );
-
+        wcError->setErrCode( wcStatus.code() );
+        wcError->setErrMessage( wcStatus.reason() );
         if ( wcResult.wTimedOut )
             wcError->setErrInfo( BSON( "wtimeout" << true ) );
 
-        wcError->setErrMessage( errMsg );
-
-        return true;
+        return wcError;
     }
 
     static WriteErrorDetail* toWriteError( const Status& status ) {
@@ -117,6 +103,10 @@ namespace mongo {
             status = writeConcern.parse( _defaultWriteConcern );
         }
 
+        if ( status.isOK() ) {
+            status = validateWriteConcern( writeConcern );
+        }
+
         if ( !status.isOK() ) {
             response->setErrCode( status.code() );
             response->setErrMessage( status.reason() );
@@ -128,9 +118,6 @@ namespace mongo {
         bool silentWC = writeConcern.wMode.empty() && writeConcern.wNumNodes == 0
                         && writeConcern.syncMode == WriteConcernOptions::NONE;
 
-        // Apply each batch item, possibly bulking some items together in the write lock.
-        // Stops on error if batch is ordered.
-
         Timer commandTimer;
 
         OwnedPointerVector<WriteErrorDetail> writeErrorsOwned;
@@ -139,46 +126,41 @@ namespace mongo {
         OwnedPointerVector<BatchedUpsertDetail> upsertedOwned;
         vector<BatchedUpsertDetail*>& upserted = upsertedOwned.mutableVector();
 
+        //
+        // Apply each batch item, possibly bulking some items together in the write lock.
+        // Stops on error if batch is ordered.
+        //
+
         bulkExecute( request, &upserted, &writeErrors );
-        bool staleBatch = !writeErrors.empty()
-                          && writeErrors.back()->getErrCode() == ErrorCodes::StaleShardVersion;
 
-        // Send upserted back in response
-        if ( upserted.size() ) {
-            response->setUpsertDetails( upserted );
-            upserted.clear();
-        }
+        //
+        // Try to enforce the write concern if everything succeeded (unordered or ordered)
+        // OR if something succeeded and we're unordered.
+        //
 
-        // Send errors back in response
-        if ( writeErrors.size() ) {
-            response->setErrDetails( writeErrors );
-            writeErrors.clear();
-        }
+        auto_ptr<WCErrorDetail> wcError;
+        bool needToEnforceWC = writeErrors.empty()
+                               || ( !request.getOrdered()
+                                    && writeErrors.size() < request.sizeWriteOps() );
 
-        // Send opTime in response
-        if ( anyReplEnabled() ) {
-            response->setLastOp( _client->getLastOp() );
-        }
-
-        // Apply write concern if we had any successful writes
-        if ( writeErrors.size() < request.sizeWriteOps() ) {
+        if ( needToEnforceWC ) {
 
             _client->curop()->setMessage( "waiting for write concern" );
 
             WriteConcernResult res;
             status = waitForWriteConcern( writeConcern, _client->getLastOp(), &res );
 
-            WCErrorDetail wcError;
-            if ( buildWCError( status, res, &wcError ) ) {
-                response->setWriteConcernError( wcError );
+            if ( !status.isOK() ) {
+                wcError.reset( toWriteConcernError( status, res ) );
             }
         }
 
-        // Set the stats for the response
-        response->setN( _stats->numInserted + _stats->numUpserted + _stats->numUpdated
-                        + _stats->numDeleted );
-        if ( request.getBatchType() == BatchedCommandRequest::BatchType_Update )
-            response->setNDocsModified( _stats->numModified );
+        //
+        // Refresh metadata if needed
+        //
+
+        bool staleBatch = !writeErrors.empty()
+                          && writeErrors.back()->getErrCode() == ErrorCodes::StaleShardVersion;
 
         // TODO: Audit where we want to queue here - the shardingState calls may block for remote
         // data
@@ -188,27 +170,52 @@ namespace mongo {
             dassert( requestMetadata );
 
             // Make sure our shard name is set or is the same as what was set previously
-            if ( !shardingState.setShardName( requestMetadata->getShardName() ) ) {
-
-                // If our shard name is stale, our version must have been stale as well
-                dassert( writeErrors.size() == request.sizeWriteOps() );
-                warning() << "shard name " << requestMetadata->getShardName()
-                          << " in batch does not match previously-set shard name "
-                          << shardingState.getShardName() << ", not reloading metadata" << endl;
-            }
-            else {
+            if ( shardingState.setShardName( requestMetadata->getShardName() ) ) {
                 // Refresh our shard version
                 ChunkVersion latestShardVersion;
                 shardingState.refreshMetadataIfNeeded( request.getTargetingNS(),
                                                        requestMetadata->getShardVersion(),
                                                        &latestShardVersion );
             }
+            else {
+                // If our shard name is stale, our version must have been stale as well
+                dassert( writeErrors.size() == request.sizeWriteOps() );
+            }
         }
 
-        if ( silentWC )
-            response->clear();
+        //
+        // Construct response
+        //
 
         response->setOk( true );
+
+        if ( !silentWC ) {
+
+            if ( upserted.size() ) {
+                response->setUpsertDetails( upserted );
+                upserted.clear();
+            }
+
+            if ( writeErrors.size() ) {
+                response->setErrDetails( writeErrors );
+                writeErrors.clear();
+            }
+
+            if ( wcError.get() ) {
+                response->setWriteConcernError( wcError.release() );
+            }
+
+            if ( anyReplEnabled() ) {
+                response->setLastOp( _client->getLastOp() );
+            }
+
+            // Set the stats for the response
+            response->setN( _stats->numInserted + _stats->numUpserted + _stats->numUpdated
+                            + _stats->numDeleted );
+            if ( request.getBatchType() == BatchedCommandRequest::BatchType_Update )
+                response->setNModified( _stats->numModified );
+        }
+
         dassert( response->isValid( NULL ) );
     }
 
@@ -389,7 +396,9 @@ namespace mongo {
             }
 
             if ( !error ) {
-                _le->recordUpdate( stats.upsertedID.isEmpty(), stats.n, stats.upsertedID );
+                _le->recordUpdate( stats.upsertedID.isEmpty() && stats.n > 0,
+                        stats.n,
+                        stats.upsertedID );
             }
         }
         else {

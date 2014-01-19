@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2014 MongoDB Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -29,7 +29,9 @@
 #pragma once
 
 #include <set>
+#include <boost/optional/optional.hpp>
 #include <boost/thread/mutex.hpp>
+
 #include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/index_tag.h"
@@ -47,11 +49,6 @@ namespace mongo {
 
      * cache should be LRU with some cap on size
 
-     * write ops should invalidate but tell plan_cache there was a write op, don't enforce policy elsewhere,
-       enforce here.
-
-     * cache key is sort + query shape + projection
-
      * {x:1} and {x:{$gt:7}} not same shape for now -- operator matters
      */
 
@@ -62,10 +59,11 @@ namespace mongo {
     struct PlanCacheEntryFeedback {
         // How well did the cached plan perform?
         boost::scoped_ptr<PlanStageStats> stats;
-    };
 
-    // TODO: Is this binary data really?
-    typedef std::string PlanCacheKey;
+        // The "goodness" score produced by the plan ranker
+        // corresponding to 'stats'.
+        double score;
+    };
 
     // TODO: Replace with opaque type.
     typedef std::string PlanID;
@@ -134,7 +132,8 @@ namespace mongo {
         SolutionCacheData() :
             tree(NULL),
             solnType(USE_INDEX_TAGS_SOLN),
-            wholeIXSolnDir(1) {
+            wholeIXSolnDir(1),
+            adminHintApplied(false) {
         }
 
         // Make a deep copy.
@@ -167,6 +166,9 @@ namespace mongo {
         // a proxy for a collection scan. Used only
         // for WHOLE_IXSCAN_SOLN.
         int wholeIXSolnDir;
+
+        // True if admin hints were applied.
+        bool adminHintApplied;
     };
 
     class PlanCacheEntry;
@@ -181,29 +183,12 @@ namespace mongo {
         CachedSolution(const PlanCacheKey& key, const PlanCacheEntry& entry);
         ~CachedSolution();
 
-        /**
-         * Resolves index of winning solution.
-         * Takes into account pinned and shunned plans.
-         * Pinned plans take precendence over shunned plans.
-         * If a plan is both pinned and shunned, it will be the winning plan.
-         * The reason we provide the index into plannerData is to support the
-         * notion of a backup plan in the multi plan runner. The cache solution
-         * runner could go to the next solution after the winner index.
-         */
-        size_t getWinnerIndex() const;
-
         // Owned here.
         std::vector<SolutionCacheData*> plannerData;
 
-        // Pin information
-        bool pinned;
-
-        // Index of pinned plan in plannerData.
-        // Valid if pinned is true.
-        size_t pinnedIndex;
-
-        // Indexes of shunned plans.
-        std::set<size_t> shunnedIndexes;
+        // An index into plannerData indicating the SolutionCacheData which should be
+        // used to produce a backup solution in the case of a blocking sort.
+        boost::optional<size_t> backupSoln;
 
         // Key used to provide feedback on the entry.
         PlanCacheKey key;
@@ -242,33 +227,53 @@ namespace mongo {
         // For debugging.
         std::string toString() const;
 
+        //
+        // Planner data
+        //
+
         // Data provided to the planner to allow it to recreate the solutions this entry
         // represents. Each SolutionCacheData is fully owned here, so in order to return
         // it from the cache a deep copy is made and returned inside CachedSolution.
         std::vector<SolutionCacheData*> plannerData;
+
+        // An index into plannerData indicating the SolutionCacheData which should be
+        // used to produce a backup solution in the case of a blocking sort.
+        boost::optional<size_t> backupSoln;
+
+        // XXX: Replace with copy of canonical query?
+        // Used by the plan cache commands to display an example query
+        // of the appropriate shape.
+        BSONObj query;
+        BSONObj sort;
+        BSONObj projection;
+
+        //
+        // Performance stats
+        //
 
         // Why the best solution was picked.
         // TODO: Do we want to store other information like the other plans considered?
         boost::scoped_ptr<PlanRankingDecision> decision;
 
         // Annotations from cached runs.  The CachedSolutionRunner provides these stats about its
-        // runs when they complete.  TODO: How many of these do we really want to keep?
+        // runs when they complete.
         std::vector<PlanCacheEntryFeedback*> feedback;
 
-        // Is this pinned in the cache?  If so, we will never remove it as a result of feedback.
-        bool pinned;
+        // The average score of all stored feedback.
+        boost::optional<double> averageScore;
 
-        // Index of pinned plan in plannerData.
-        // Valid if pinned is true.
-        size_t pinnedIndex;
+        // The standard deviation of the scores from stored as feedback.
+        boost::optional<double> stddevScore;
 
-        // Indexes of shunned plans.
-        std::set<size_t> shunnedIndexes;
+        // Determines the amount of feedback that we are willing to store. Must be >= 1.
+        // TODO: how do we tune this?
+        static const size_t kMaxFeedback;
 
-        // XXX: Replace with copy of canonical query?
-        BSONObj query;
-        BSONObj sort;
-        BSONObj projection;
+        // The number of standard deviations which must be exceeded
+        // in order to determine that the cache entry should be removed.
+        // Must be positive. TODO how do we tune this?
+        static const double kStdDevThreshold;
+
     };
 
     /**
@@ -295,15 +300,12 @@ namespace mongo {
         static bool shouldCacheQuery(const CanonicalQuery& query);
 
         /**
-         * Normalizes canonical query for caching.
-         * Current sorts nodes of internal match expression.
-         * Not to be confused with internal function CanonicalQuery::normalizeTree()
-         */
-        static void normalizeQueryForCache(CanonicalQuery* queryOut);
-
-        /**
          * Generates a key for a normalized (for caching) canonical query
          * from the match expression and sort order.
+         * This is an expensive operation because it clones and sorts
+         * the expression tree in order to generate a string from
+         * the normalized expression tree. The string generation is also
+         * potentially expensive.
          */
         static PlanCacheKey getPlanCacheKey(const CanonicalQuery& query);
 
@@ -338,35 +340,28 @@ namespace mongo {
         Status get(const CanonicalQuery& query, CachedSolution** crOut) const;
 
         /**
-         * Look up the cached data access for the provided key.
-         *
-         * If there is no entry in the cache for the 'query', returns an error Status.
-         *
-         * If there is an entry in the cache, populates 'crOut' and returns Status::OK().  Caller
-         * owns '*crOut'.
-         */
-        Status get(const PlanCacheKey& key, CachedSolution** crOut) const;
-
-        /**
          * When the CachedPlanRunner runs a plan out of the cache, we want to record data about the
          * plan's performance.  The CachedPlanRunner calls feedback(...) at the end of query
          * execution in order to do this.
          *
          * Cache takes ownership of 'feedback'.
          *
-         * If the entry corresponding to 'ck' isn't in the cache anymore, the feedback is ignored
+         * If the entry corresponding to 'cq' isn't in the cache anymore, the feedback is ignored
          * and an error Status is returned.
          *
-         * If the entry corresponding to 'ck' still exists, 'feedback' is added to the run
+         * If the entry corresponding to 'cq' still exists, 'feedback' is added to the run
          * statistics about the plan.  Status::OK() is returned.
+         *
+         * May cause the cache entry to be removed if it is determined that the cached plan
+         * is badly performing.
          */
-        Status feedback(const PlanCacheKey& ck, PlanCacheEntryFeedback* feedback);
+        Status feedback(const CanonicalQuery& cq, PlanCacheEntryFeedback* feedback);
 
         /**
          * Remove the entry corresponding to 'ck' from the cache.  Returns Status::OK() if the plan
          * was present and removed and an error status otherwise.
          */
-        Status remove(const PlanCacheKey& ck);
+        Status remove(const CanonicalQuery& canonicalQuery);
 
         /**
          * Remove *all* entries.
@@ -374,36 +369,17 @@ namespace mongo {
         void clear();
 
         /**
-         * Traverses expression tree post-order.
-         * Sorts children at each non-leaf node by (MatchType, path(), cacheKey)
+         * Returns a vector of all cached solutions.
+         * Caller owns the result vector and is responsible for cleaning up
+         * the cached solutions.
          */
-        static void sortTree(MatchExpression* tree);
+        std::vector<CachedSolution*> getAllSolutions() const;
 
         /**
-         * Retrieves all plan cache keys
+         * Returns number of entries in cache.
+         * Used for testing.
          */
-        void getKeys(std::vector<PlanCacheKey>* keysOut) const;
-
-        /**
-         * Pins plan on a query in the cache. Subsequent cached solutions
-         * will be generated based on the pinned plan.
-         */
-        Status pin(const PlanCacheKey& key, const PlanID& plan);
-
-        /**
-         * Unpins query. No-op if there is no plan pinned to the query.
-         */
-        Status unpin(const PlanCacheKey& key);
-
-        /**
-         * Adds user-defined plan.
-         */
-        Status addPlan(const PlanCacheKey& key, const BSONObj& details, PlanID* planOut);
-
-        /**
-         * Removes plan from cache entry.
-         */
-        Status shunPlan(const PlanCacheKey& key, const PlanID& plan);
+        size_t size() const;
 
         /**
          *  You must notify the cache if you are doing writes, as query plan utility will change.

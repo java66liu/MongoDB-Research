@@ -27,7 +27,7 @@
  */
 
 #include "mongo/client/dbclientcursor.h"
-#include "mongo/db/database.h"
+#include "mongo/db/catalog/database.h"
 #include "mongo/db/exec/fetch.h"
 #include "mongo/db/exec/index_scan.h"
 #include "mongo/db/exec/plan_stage.h"
@@ -35,7 +35,7 @@
 #include "mongo/db/instance.h"
 #include "mongo/db/json.h"
 #include "mongo/db/query/plan_executor.h"
-#include "mongo/db/structure/collection.h"
+#include "mongo/db/catalog/collection.h"
 #include "mongo/db/structure/collection_iterator.h"
 #include "mongo/dbtests/dbtests.h"
 
@@ -532,7 +532,7 @@ namespace QueryStageMergeSortTests {
 
             // Invalidate locs[11].  Should force a fetch.  We don't get it back.
             ms->prepareToYield();
-            ms->invalidate(*it);
+            ms->invalidate(*it, INVALIDATION_DELETION);
             ms->recoverFromYield();
 
             // Make sure locs[11] was fetched for us.

@@ -40,7 +40,7 @@
 #include "mongo/client/dbclientinterface.h"
 #include "mongo/db/clientcursor.h"
 #include "mongo/db/index_set.h"
-#include "mongo/db/namespace_details.h"
+#include "mongo/db/structure/catalog/namespace_details.h"
 #include "mongo/db/ops/update_driver.h"
 #include "mongo/db/ops/update_lifecycle.h"
 #include "mongo/db/pagefault.h"
@@ -51,7 +51,7 @@
 #include "mongo/db/queryutil.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/storage/record.h"
-#include "mongo/db/structure/collection.h"
+#include "mongo/db/catalog/collection.h"
 #include "mongo/platform/unordered_set.h"
 
 namespace mongo {
@@ -442,12 +442,26 @@ namespace mongo {
             uasserted(16840, status.reason());
         }
 
-        return update(request, opDebug, &driver);
+        CanonicalQuery* cq;
+        status = CanonicalQuery::canonicalize(request.getNamespaceString(),
+                                              request.getQuery(),
+                                              &cq);
+        if (!status.isOK()) {
+            uasserted(17242, "could not canonicalize query " + request.getQuery().toString() +
+                      "; " + causedBy(status));
+        }
+        return update(request, opDebug, &driver, cq);
     }
 
-    UpdateResult update(const UpdateRequest& request, OpDebug* opDebug, UpdateDriver* driver) {
+    UpdateResult update(
+            const UpdateRequest& request,
+            OpDebug* opDebug,
+            UpdateDriver* driver,
+            CanonicalQuery* cq) {
+
         LOG(3) << "processing update : " << request;
 
+        std::auto_ptr<CanonicalQuery> cqHolder(cq);
         const NamespaceString& nsString = request.getNamespaceString();
         UpdateLifecycle* lifecycle = request.getLifecycle();
         const CurOp* curOp = cc().curop();
@@ -464,13 +478,8 @@ namespace mongo {
             driver->refreshIndexKeys(lifecycle->getIndexKeys());
         }
 
-        CanonicalQuery* cq;
-        if (!CanonicalQuery::canonicalize(nsString, request.getQuery(), &cq).isOK()) {
-            uasserted(17242, "could not canonicalize query " + request.getQuery().toString());
-        }
-
         Runner* rawRunner;
-        if (!getRunner(collection, cq, &rawRunner).isOK()) {
+        if (!getRunner(collection, cqHolder.release(), &rawRunner).isOK()) {
             uasserted(17243, "could not get runner " + request.getQuery().toString());
         }
 
@@ -508,7 +517,7 @@ namespace mongo {
         // reflecting only the actions taken locally. In particlar, we must have the no-op
         // counter reset so that we can meaningfully comapre it with numMatched above.
         opDebug->nscanned = 0;
-        opDebug->nDocsModified = 0;
+        opDebug->nModified = 0;
 
         // Get the cached document from the update driver.
         mutablebson::Document& doc = driver->getDocument();
@@ -528,7 +537,7 @@ namespace mongo {
 
         while (true) {
             // See if we have a write in isolation mode
-            isolationModeWriteOccured = isolated && (opDebug->nDocsModified > 0);
+            isolationModeWriteOccured = isolated && (opDebug->nModified > 0);
 
             // Change to manual yielding (no yielding) if we have written in isolation mode
             if (isolationModeWriteOccured) {
@@ -668,6 +677,12 @@ namespace mongo {
                 // no work to do, in which case we want to consider the object unchanged.
                 if (!damages.empty() ) {
 
+                    // Broadcast the mutation so that query results stay correct.
+                    ClientCursor::invalidateDocument(nsString.ns(),
+                                                     collection->details(),
+                                                     loc,
+                                                     INVALIDATION_MUTATION);
+
                     collection->details()->paddingFits();
 
                     // All updates were in place. Apply them via durability and writing pointer.
@@ -723,7 +738,7 @@ namespace mongo {
 
             // Only record doc modifications if they wrote (exclude no-ops)
             if (docWasModified)
-                opDebug->nDocsModified++;
+                opDebug->nModified++;
 
             if (!request.isMulti()) {
                 break;
@@ -738,7 +753,7 @@ namespace mongo {
             opDebug->nupdated = numMatched;
             return UpdateResult(numMatched > 0 /* updated existing object(s) */,
                                 !driver->isDocReplacement() /* $mod or obj replacement */,
-                                opDebug->nDocsModified /* number of modified docs, no no-ops */,
+                                opDebug->nModified /* number of modified docs, no no-ops */,
                                 numMatched /* # of docs matched/updated, even no-ops */,
                                 BSONObj());
         }

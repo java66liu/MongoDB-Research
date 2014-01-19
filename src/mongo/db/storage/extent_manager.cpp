@@ -34,8 +34,7 @@
 
 #include "mongo/db/client.h"
 #include "mongo/db/d_concurrency.h"
-#include "mongo/db/memconcept.h"
-#include "mongo/db/namespace_details.h"
+#include "mongo/db/structure/catalog/namespace_details.h"
 #include "mongo/db/storage/data_file.h"
 #include "mongo/db/storage/extent.h"
 #include "mongo/db/storage/extent_manager.h"
@@ -209,9 +208,13 @@ namespace mongo {
         return reinterpret_cast<Record*>( df->p() + ofs );
     }
 
-    Extent* ExtentManager::extentFor( const DiskLoc& loc ) const {
+    DiskLoc ExtentManager::extentLocFor( const DiskLoc& loc ) const {
         Record* record = recordFor( loc );
-        DiskLoc extentLoc( loc.a(), record->extentOfs() );
+        return DiskLoc( loc.a(), record->extentOfs() );
+    }
+
+    Extent* ExtentManager::extentFor( const DiskLoc& loc ) const {
+        DiskLoc extentLoc = extentLocFor( loc );
         return getExtent( extentLoc );
     }
 
@@ -220,7 +223,6 @@ namespace mongo {
         Extent* e = reinterpret_cast<Extent*>( _getOpenFile( loc.a() )->p() + loc.getOfs() );
         if ( doSanityCheck )
             e->assertOk();
-        memconcept::is(e, memconcept::concept::extent);
         return e;
     }
 

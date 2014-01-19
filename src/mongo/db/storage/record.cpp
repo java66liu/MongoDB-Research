@@ -35,7 +35,7 @@
 #include "mongo/base/init.h"
 #include "mongo/db/commands/server_status.h"
 #include "mongo/db/curop.h"
-#include "mongo/db/database_holder.h"
+#include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/pagefault.h"
 #include "mongo/db/pdfile.h"
 #include "mongo/platform/bits.h"
@@ -526,16 +526,12 @@ namespace mongo {
     Record* DiskLoc::rec() const {
         // XXX-ERH
         verify(a() != -1);
-        Record *r = cc().database()->getExtentManager().recordFor( *this );
-        memconcept::is(r, memconcept::concept::record);
-        return r;
+        return cc().database()->getExtentManager().recordFor( *this );
     }
 
     DeletedRecord* DiskLoc::drec() const {
         verify( _a != -1 );
-        DeletedRecord* dr = reinterpret_cast<DeletedRecord*>(rec());
-        memconcept::is(dr, memconcept::concept::deletedrecord);
-        return dr;
+        return reinterpret_cast<DeletedRecord*>(rec());
     }
 
     Extent* DiskLoc::ext() const {

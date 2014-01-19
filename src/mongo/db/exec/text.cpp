@@ -94,7 +94,7 @@ namespace mongo {
         // TODO: When we incrementally read results, tell our sub-runners to unyield.
     }
 
-    void TextStage::invalidate(const DiskLoc& dl) {
+    void TextStage::invalidate(const DiskLoc& dl, InvalidationType type) {
         ++_commonStats.invalidates;
         // TODO: This is much slower than it should be.
         for (size_t i = 0; i < _results.size(); ++i) {
@@ -137,7 +137,6 @@ namespace mongo {
             params.bounds.endKeyInclusive = true;
             params.bounds.isSimpleRange = true;
             params.descriptor = idxMatches[0];
-            params.forceBtreeAccessMethod = true;
             params.direction = -1;
             IndexScan* ixscan = new IndexScan(params, _ws, NULL);
             scanners.push_back(ixscan);

@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2013 MongoDB Inc.
+ *    Copyright (C) 2014 MongoDB Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -34,7 +34,6 @@
 
 #include <algorithm>
 #include <ostream>
-#include <sstream>
 #include <memory>
 #include "mongo/db/jsobj.h"
 #include "mongo/db/json.h"
@@ -51,7 +50,6 @@ using namespace mongo;
 namespace {
 
     using std::auto_ptr;
-    using std::stringstream;
 
     static const char* ns = "somebogusns";
 
@@ -107,10 +105,10 @@ namespace {
     MatchExpression* parseMatchExpression(const BSONObj& obj) {
         StatusWithMatchExpression status = MatchExpressionParser::parse(obj);
         if (!status.isOK()) {
-            stringstream ss;
+            mongoutils::str::stream ss;
             ss << "failed to parse query: " << obj.toString()
                << ". Reason: " << status.toString();
-            FAIL(ss.str());
+            FAIL(ss);
         }
         MatchExpression* expr(status.getValue());
         return expr;
@@ -120,12 +118,12 @@ namespace {
         if (actual->equivalent(expected)) {
             return;
         }
-        stringstream ss;
+        mongoutils::str::stream ss;
         ss << "Match expressions are not equivalent."
            << "\nOriginal query: " << queryStr
            << "\nExpected: " << expected->toString()
            << "\nActual: " << actual->toString();
-        FAIL(ss.str());
+        FAIL(ss);
     }
 
     //
@@ -157,62 +155,6 @@ namespace {
         solns->clear();
     }
 
-    TEST(CachedSolutionTest, GetWinnerIndexNoPinnedOrShunnedPlans) {
-        std::vector<QuerySolution*> solns(5U);
-        for (size_t i = 0; i<solns.size(); ++i) {
-            auto_ptr<QuerySolution> qs(new QuerySolution());
-            qs->cacheData.reset(new SolutionCacheData());
-            qs->cacheData->solnType = SolutionCacheData::COLLSCAN_SOLN;
-            qs->cacheData->tree.reset(new PlanCacheIndexTree());
-            solns[i] = qs.release();
-        }
-        PlanCacheEntry entry(solns, new PlanRankingDecision());
-        deleteQuerySolutions(&solns);
-        PlanCacheKey key("boguskey");
-        CachedSolution cs(key, entry);
-        ASSERT_EQUALS(0U, cs.getWinnerIndex());
-    }
-
-    TEST(CachedSolutionTest, GetWinnerIndexWithPinnedPlan) {
-        std::vector<QuerySolution*> solns(5U);
-        std::generate(solns.begin(), solns.end(), GenerateQuerySolution());
-        PlanCacheEntry entry(solns, new PlanRankingDecision());
-        deleteQuerySolutions(&solns);
-        // Pin 3rd plan.
-        entry.pinned = true;
-        entry.pinnedIndex = 2U;
-        PlanCacheKey key("boguskey");
-        CachedSolution cs(key, entry);
-        ASSERT_EQUALS(entry.pinnedIndex, cs.getWinnerIndex());
-    }
-
-    TEST(CachedSolutionTest, GetWinnerIndexWithShunnedPlans) {
-        std::vector<QuerySolution*> solns(5U);
-        std::generate(solns.begin(), solns.end(), GenerateQuerySolution());
-        PlanCacheEntry entry(solns, new PlanRankingDecision());
-        deleteQuerySolutions(&solns);
-        // Shun first 2 plans.
-        entry.shunnedIndexes.insert(0U);
-        entry.shunnedIndexes.insert(1U);
-        PlanCacheKey key("boguskey");
-        CachedSolution cs(key, entry);
-        ASSERT_EQUALS(2U, cs.getWinnerIndex());
-    }
-
-    TEST(CachedSolutionTest, GetWinnerIndexWithPinnedAndShunnedPlan) {
-        std::vector<QuerySolution*> solns(5U);
-        std::generate(solns.begin(), solns.end(), GenerateQuerySolution());
-        PlanCacheEntry entry(solns, new PlanRankingDecision());
-        deleteQuerySolutions(&solns);
-        // Pin and shun 2nd plan.
-        entry.pinned = true;
-        entry.pinnedIndex = 1U;
-        entry.shunnedIndexes.insert(1U);
-        PlanCacheKey key("boguskey");
-        CachedSolution cs(key, entry);
-        ASSERT_EQUALS(1U, cs.getWinnerIndex());
-    }
-
     /**
      * Test functions for shouldCacheQuery
      * Use these functions to assert which categories
@@ -223,18 +165,18 @@ namespace {
         if (PlanCache::shouldCacheQuery(query)) {
             return;
         }
-        stringstream ss;
+        mongoutils::str::stream ss;
         ss << "Canonical query should be cacheable: " << query.toString();
-        FAIL(ss.str());
+        FAIL(ss);
     }
 
     void assertShouldNotCacheQuery(const CanonicalQuery& query) {
         if (!PlanCache::shouldCacheQuery(query)) {
             return;
         }
-        stringstream ss;
+        mongoutils::str::stream ss;
         ss << "Canonical query should not be cacheable: " << query.toString();
-        FAIL(ss.str());
+        FAIL(ss);
     }
 
     void assertShouldNotCacheQuery(const char* queryStr) {
@@ -301,33 +243,6 @@ namespace {
         assertShouldNotCacheQuery(*cq);
     }
 
-    /**
-     * Test functions for normalizeQueryForCache.
-     * Cacheable queries need to go through an additional level of normalization beyong
-     * what's already done in CanonicalQuery::normalizeTree.
-     * The current behavior is to sort the internal nodes of the match expression
-     * to ensure all operator/field name nodes are ordered the same way.
-     */
-
-    void testNormalizeQueryForCache(const char* queryStr, const char* expectedExprStr) {
-        auto_ptr<CanonicalQuery> cq(canonicalize(queryStr));
-        PlanCache::normalizeQueryForCache(cq.get());
-        MatchExpression* me = cq->root();
-        BSONObj expectedExprObj = fromjson(expectedExprStr);
-        auto_ptr<MatchExpression> expectedExpr(parseMatchExpression(expectedExprObj));
-        assertEquivalent(queryStr, expectedExpr.get(), me);
-    }
-
-    TEST(PlanCacheTest, NormalizeQueryForCache) {
-        // Field names
-        testNormalizeQueryForCache("{b: 1, a: 1}", "{a: 1, b: 1}");
-        // Operator types
-        testNormalizeQueryForCache("{a: {$gt: 5}, a: {$lt: 10}}}", "{a: {$lt: 10}, a: {$gt: 5}}");
-        // Nested queries
-        testNormalizeQueryForCache("{a: {$elemMatch: {c: 1, b:1}}}",
-                                   "{a: {$elemMatch: {b: 1, c:1}}}");
-    }
-
     // Adding an empty vector of query solutions should fail.
     TEST(PlanCacheTest, AddEmptySolutions) {
         PlanCache planCache;
@@ -345,14 +260,7 @@ namespace {
         std::vector<QuerySolution*> solns;
         solns.push_back(&qs);
         ASSERT_OK(planCache.add(*cq, solns, new PlanRankingDecision()));
-        std::vector<PlanCacheKey> keys;
-        planCache.getKeys(&keys);
-        ASSERT_EQUALS(keys.size(), 1U);
-
-        // Calling getKeys() with a non-empty vector
-        // should result in the vector contents being replaced.
-        planCache.getKeys(&keys);
-        ASSERT_EQUALS(keys.size(), 1U);
+        ASSERT_EQUALS(planCache.size(), 1U);
     }
 
     TEST(PlanCacheTest, NotifyOfWriteOp) {
@@ -364,22 +272,18 @@ namespace {
         std::vector<QuerySolution*> solns;
         solns.push_back(&qs);
         ASSERT_OK(planCache.add(*cq, solns, new PlanRankingDecision()));
-        std::vector<PlanCacheKey> keys;
-        planCache.getKeys(&keys);
-        ASSERT_EQUALS(keys.size(), 1U);
+        ASSERT_EQUALS(planCache.size(), 1U);
 
         // First (PlanCache::kPlanCacheMaxWriteOperations - 1) notifications should have
         // no effect on cache contents.
         for (int i = 0; i < (PlanCache::kPlanCacheMaxWriteOperations - 1); ++i) {
             planCache.notifyOfWriteOp();
         }
-        planCache.getKeys(&keys);
-        ASSERT_EQUALS(keys.size(), 1U);
+        ASSERT_EQUALS(planCache.size(), 1U);
 
         // 1000th notification will cause cache to be cleared.
         planCache.notifyOfWriteOp();
-        planCache.getKeys(&keys);
-        ASSERT_TRUE(keys.empty());
+        ASSERT_EQUALS(planCache.size(), 0U);
 
         // Clearing the cache should reset the internal write
         // operation counter.
@@ -392,52 +296,12 @@ namespace {
         for (int i = 0; i < (PlanCache::kPlanCacheMaxWriteOperations - 1); ++i) {
             planCache.notifyOfWriteOp();
         }
-        planCache.getKeys(&keys);
-        ASSERT_EQUALS(keys.size(), 1U);
+        ASSERT_EQUALS(planCache.size(), 1U);
         planCache.clear();
         ASSERT_OK(planCache.add(*cq, solns, new PlanRankingDecision()));
         // Notification after clearing will not flush cache.
         planCache.notifyOfWriteOp();
-        planCache.getKeys(&keys);
-        ASSERT_EQUALS(keys.size(), 1U);
-    }
-    /**
-     * Test functions for getPlanCacheKey.
-     * Cache keys are intentionally obfuscated and are meaningful only
-     * within the current lifetime of the server process. Users should treat
-     * plan cache keys as opaque.
-     */
-    void testGetPlanCacheKey(const char* queryStr, const char* sortStr,
-                             const char* projStr,
-                             const char *expectedStr) {
-        auto_ptr<CanonicalQuery> cq(canonicalize(queryStr, sortStr, projStr));
-        PlanCacheKey key = PlanCache::getPlanCacheKey(*cq);
-        PlanCacheKey expectedKey(expectedStr);
-        if (key == expectedKey) {
-            return;
-        }
-        stringstream ss;
-        ss << "Unexpected plan cache key. Expected: " << expectedKey << ". Actual: " << key
-           << ". Query: " << cq->toString();
-        FAIL(ss.str());
-    }
-
-    TEST(PlanCacheTest, getPlanCacheKey) {
-        // Generated cache keys should be treated as opaque to the user.
-        // No sorts
-        testGetPlanCacheKey("{}", "{}", "{}", "an");
-        testGetPlanCacheKey("{$or: [{a: 1}, {b: 2}]}", "{}", "{}", "oreqaeqb");
-        // With sort
-        testGetPlanCacheKey("{}", "{a: 1}", "{}", "anaa");
-        testGetPlanCacheKey("{}", "{a: -1}", "{}", "anda");
-        testGetPlanCacheKey("{}", "{a: {$meta: 'textScore'}}", "{}", "anta");
-        // With projection
-        testGetPlanCacheKey("{}", "{}", "{a: 1}", "anp1a");
-        testGetPlanCacheKey("{}", "{}", "{a: 0}", "anp0a");
-        testGetPlanCacheKey("{}", "{}", "{a: 99}", "anp99a");
-        testGetPlanCacheKey("{}", "{}", "{a: 'foo'}", "anp\"foo\"a");
-        testGetPlanCacheKey("{}", "{}", "{a: {$slice: [3, 5]}}", "anp{ $slice: [ 3, 5 ] }a");
-        testGetPlanCacheKey("{}", "{}", "{a: {$elemMatch: {x: 2}}}", "anp{ $elemMatch: { x: 2 } }a");
+        ASSERT_EQUALS(planCache.size(), 1U);
     }
 
     /**
@@ -559,16 +423,12 @@ namespace {
         // Solution introspection.
         //
 
-        void dumpSolutions(ostream& ost) const {
+        void dumpSolutions(mongoutils::str::stream& ost) const {
             for (vector<QuerySolution*>::const_iterator it = solns.begin();
                     it != solns.end();
                     ++it) {
-                ost << (*it)->toString() << endl;
+                ost << (*it)->toString() << '\n';
             }
-        }
-
-        void dumpSolutions() const {
-            dumpSolutions(std::cout);
         }
 
         /**
@@ -607,8 +467,9 @@ namespace {
             PlanCacheEntry entry(solutions, new PlanRankingDecision());
             CachedSolution cachedSoln(ck, entry);
 
-            QuerySolution* out;
-            s = QueryPlanner::planFromCache(*scopedCq.get(), params, &cachedSoln, &out);
+            QuerySolution *out, *backupOut;
+            s = QueryPlanner::planFromCache(*scopedCq.get(), params, &cachedSoln,
+                                            &out, &backupOut);
             ASSERT_OK(s);
 
             return out;
@@ -631,11 +492,11 @@ namespace {
                 }
             }
 
-            std::stringstream ss;
+            mongoutils::str::stream ss;
             ss << "Could not find a match for solution " << solnJson
-               << " All solutions generated: " << std::endl;
+               << " All solutions generated: " << '\n';
             dumpSolutions(ss);
-            FAIL(ss.str());
+            FAIL(ss);
 
             return NULL;
         }
@@ -649,10 +510,10 @@ namespace {
         void assertSolutionMatches(QuerySolution* trueSoln, const string& solnJson) const {
             BSONObj testSoln = fromjson(solnJson);
             if (!QueryPlannerTestLib::solutionMatches(testSoln, trueSoln->root.get())) {
-                std::stringstream ss;
+                mongoutils::str::stream ss;
                 ss << "Expected solution " << solnJson << " did not match true solution: "
-                   << trueSoln->toString() << std::endl;
-                FAIL(ss.str());
+                   << trueSoln->toString() << '\n';
+                FAIL(ss);
             }
         }
 

@@ -52,7 +52,7 @@
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/write_concern.h"
 #include "mongo/db/storage_options.h"
-#include "mongo/db/structure/collection.h"
+#include "mongo/db/catalog/collection.h"
 #include "mongo/s/d_logic.h"
 
 namespace mongo {
@@ -136,7 +136,10 @@ namespace mongo {
         if ( indexFound )
             *indexFound = 1;
 
-        BtreeBasedAccessMethod* accessMethod = catalog->getBtreeBasedIndex( desc );
+        // See SERVER-12397.  This may not always be true.
+        BtreeBasedAccessMethod* accessMethod =
+            static_cast<BtreeBasedAccessMethod*>(catalog->getIndex( desc ));
+
         DiskLoc loc = accessMethod->findSingle( query["_id"].wrap() );
         if ( loc.isNull() )
             return false;
@@ -149,7 +152,9 @@ namespace mongo {
         IndexCatalog* catalog = collection->getIndexCatalog();
         const IndexDescriptor* desc = catalog->findIdIndex();
         uassert(13430, "no _id index", desc);
-        BtreeBasedAccessMethod* accessMethod = catalog->getBtreeBasedIndex( desc );
+        // See SERVER-12397.  This may not always be true.
+        BtreeBasedAccessMethod* accessMethod =
+            static_cast<BtreeBasedAccessMethod*>(catalog->getIndex( desc ));
         return accessMethod->findSingle( idquery["_id"].wrap() );
     }
 

@@ -37,7 +37,7 @@
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/instance.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/structure/collection.h"
+#include "mongo/db/catalog/collection.h"
 #include "mongo/db/structure/collection_iterator.h"
 
 namespace mongo {
@@ -147,7 +147,7 @@ namespace mongo {
                 }
 
                 {
-                    NamespaceDetails *nsd = nsdetails( source );
+                    const NamespaceDetails *nsd = nsdetails( source );
                     indexesInProg = stopIndexBuilds( dbname, cmdObj );
                     capped = nsd->isCapped();
                     if ( capped )

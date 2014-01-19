@@ -33,7 +33,7 @@
 #include "mongo/bson/optime.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/index/index_descriptor.h"
-#include "mongo/db/storage/index_details.h"
+#include "mongo/db/structure/catalog/index_details.h"
 #include "mongo/db/repl/oplogreader.h"
 #include "mongo/db/repl/rs_config.h"
 #include "mongo/db/repl/rs_exception.h"
@@ -367,6 +367,8 @@ namespace mongo {
         SyncSourceFeedback syncSourceFeedback;
 
         OpTime lastOpTimeWritten;
+        OpTime getEarliestOpTimeWritten() const;
+
         long long lastH; // hash we use to make sure we are reading the right flow of ops and aren't on an out-of-date "fork"
         bool forceSyncFrom(const string& host, string& errmsg, BSONObjBuilder& result);
         // Check if the current sync target is suboptimal. This must be called while holding a mutex

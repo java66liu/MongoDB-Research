@@ -27,7 +27,7 @@
  */
 
 #include "mongo/client/dbclientcursor.h"
-#include "mongo/db/database.h"
+#include "mongo/db/catalog/database.h"
 #include "mongo/db/exec/fetch.h"
 #include "mongo/db/exec/mock_stage.h"
 #include "mongo/db/exec/plan_stage.h"
@@ -35,7 +35,7 @@
 #include "mongo/db/instance.h"
 #include "mongo/db/json.h"
 #include "mongo/db/query/plan_executor.h"
-#include "mongo/db/structure/collection.h"
+#include "mongo/db/catalog/collection.h"
 #include "mongo/db/structure/collection_iterator.h"
 #include "mongo/dbtests/dbtests.h"
 
@@ -275,7 +275,7 @@ namespace QueryStageSortTests {
             // We should have read in the first 'firstRead' locs.  Invalidate the first.
             ss->prepareToYield();
             set<DiskLoc>::iterator it = locs.begin();
-            ss->invalidate(*it++);
+            ss->invalidate(*it++, INVALIDATION_DELETION);
             ss->recoverFromYield();
 
             // Read the rest of the data from the mock stage.
@@ -290,11 +290,11 @@ namespace QueryStageSortTests {
             // Let's just invalidate everything now.
             ss->prepareToYield();
             while (it != locs.end()) {
-                ss->invalidate(*it++);
+                ss->invalidate(*it++, INVALIDATION_DELETION);
             }
             ss->recoverFromYield();
 
-            // After invalidating all our data, we have nothing left to sort.
+            // Invalidation of data in the sort stage fetches it but passes it through.
             int count = 0;
             while (!ss->isEOF()) {
                 WorkingSetID id;
@@ -306,8 +306,8 @@ namespace QueryStageSortTests {
                 ++count;
             }
 
-            // Therefore, we expect an empty result set from running the sort stage to completion.
-            ASSERT_EQUALS(0, count);
+            // Returns all docs.
+            ASSERT_EQUALS(limit() ? limit() : numObj(), count);
         }
     };
 

@@ -71,7 +71,7 @@ namespace mongo {
 
         virtual bool restoreState();
 
-        virtual void invalidate(const DiskLoc& dl);
+        virtual void invalidate(const DiskLoc& dl, InvalidationType type);
 
         virtual void setYieldPolicy(Runner::YieldPolicy policy);
 
@@ -86,6 +86,11 @@ namespace mongo {
          */
         virtual Status getExplainPlan(TypeExplain** explain) const;
 
+        /**
+         * Takes ownership of all arguments.
+         */
+        void setBackupPlan(QuerySolution* qs, PlanStage* root, WorkingSet* ws);
+
     private:
         void updateCache();
 
@@ -93,10 +98,22 @@ namespace mongo {
         boost::scoped_ptr<QuerySolution> _solution;
         boost::scoped_ptr<PlanExecutor> _exec;
 
+        // Owned here. If non-NULL, then this plan executor is capable
+        // of executing a backup plan in the case of a blocking sort.
+        std::auto_ptr<PlanExecutor> _backupPlan;
+
+        // Owned here. If non-NULL, contains the query solution corresponding
+        // to the backup plan.
+        boost::scoped_ptr<QuerySolution> _backupSolution;
+
+        // Whether the executor for the winning plan has produced results yet.
+        bool _alreadyProduced;
+
         // Have we updated the cache with our plan stats yet?
         bool _updatedCache;
 
-        // CacheKey _cacheKey;
+        // Has the runner been killed?
+        bool _killed;
     };
 
 }  // namespace mongo

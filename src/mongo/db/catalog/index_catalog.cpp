@@ -35,6 +35,8 @@
 #include "mongo/db/audit.h"
 #include "mongo/db/background.h"
 #include "mongo/db/catalog/index_create.h"
+#include "mongo/db/catalog/index_create.h"
+#include "mongo/db/client.h"
 #include "mongo/db/clientcursor.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/field_ref.h"
@@ -50,11 +52,14 @@
 #include "mongo/db/index/s2_access_method.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/jsobjmanipulator.h"
 #include "mongo/db/keypattern.h"
 #include "mongo/db/ops/delete.h"
 #include "mongo/db/query/internal_plans.h"
 #include "mongo/db/repl/rs.h" // this is ugly
-#include "mongo/db/structure/collection.h"
+#include "mongo/db/catalog/collection.h"
+#include "mongo/db/storage/data_file.h"
+#include "mongo/db/structure/catalog/namespace_details-inl.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/log.h"
 
@@ -135,9 +140,8 @@ namespace mongo {
         IndexCatalogEntry* save = entry.get();
         _entries.add( entry.release() );
 
-        verify( save == _entries.find( descriptor ) );
-        verify( save == _entries.find( descriptor->indexName() ) );
-
+        invariant( save == _entries.find( descriptor ) );
+        invariant( save == _entries.find( descriptor->indexName() ) );
         return save;
     }
 
@@ -280,14 +284,14 @@ namespace mongo {
 
         // sanity checks, etc...
         IndexCatalogEntry* entry = indexBuildBlock.getEntry();
-        verify( entry );
+        invariant( entry );
         IndexDescriptor* descriptor = entry->descriptor();
-        verify( descriptor );
+        invariant( descriptor );
 
         string idxName = descriptor->indexName(); // out copy for yields, etc...
 
-        verify( entry == _entries.find( descriptor ) );
-        verify( _details->_catalogFindIndexByName( idxName, true ) >= 0 );
+        invariant( entry == _entries.find( descriptor ) );
+        invariant( _details->_catalogFindIndexByName( idxName, true ) >= 0 );
 
         try {
             // Set curop description before setting indexBuildInProg, so that there's something
@@ -302,7 +306,7 @@ namespace mongo {
 
             // sanity check
             int idxNo = _details->_catalogFindIndexByName( idxName, true );
-            verify( idxNo < numIndexesReady() );
+            invariant( idxNo < numIndexesReady() );
 
             return Status::OK();
         }
@@ -335,12 +339,12 @@ namespace mongo {
           _entry( NULL ),
           _inProgress( false ) {
 
-        verify( collection );
+        invariant( collection );
     }
 
     Status IndexCatalog::IndexBuildBlock::init() {
         // we do special cleanup until we're far enough in
-        verify( _inProgress == false );
+        invariant( _inProgress == false );
 
         // need this first for names, etc...
         IndexDescriptor* descriptor = new IndexDescriptor( _collection, _spec );
@@ -356,7 +360,7 @@ namespace mongo {
         // 1) insert into system.indexes
 
         Collection* systemIndexes = db->getOrCreateCollection( db->_indexesName );
-        verify( systemIndexes );
+        invariant( systemIndexes );
 
         StatusWith<DiskLoc> systemIndexesEntry = systemIndexes->insertDocument( _spec, false );
         if ( !systemIndexesEntry.isOK() )
@@ -392,7 +396,7 @@ namespace mongo {
 
         // 3) indexes entry in .ns file
         NamespaceIndex& nsi = db->namespaceIndex();
-        verify( nsi.details( descriptor->indexNamespace() ) == NULL );
+        invariant( nsi.details( descriptor->indexNamespace() ) == NULL );
         nsi.add_ns( descriptor->indexNamespace(), DiskLoc(), false );
 
         // 4) system.namespaces entry index ns
@@ -436,7 +440,7 @@ namespace mongo {
         fassert( 17205, idxNo >= 0 );
 
         IndexCatalogEntry* entry = _catalog->_entries.find( _indexName );
-        verify( entry == _entry );
+        invariant( entry == _entry );
 
         if ( entry ) {
             _catalog->_dropIndex( entry );
@@ -702,7 +706,9 @@ namespace mongo {
         ClientCursor::invalidate( _collection->ns().ns() );
 
         // make sure nothing in progress
-        verify( numIndexesTotal() == numIndexesReady() );
+        massert( 17348,
+                 "cannot dropAllIndexes when index builds in progress",
+                 numIndexesTotal() == numIndexesReady() );
 
         bool haveIdIndex = false;
 
@@ -719,16 +725,16 @@ namespace mongo {
                 }
                 indexNamesToDrop.push_back( desc->indexName() );
             }
-            verify( seen == numIndexesTotal() );
+            invariant( seen == numIndexesTotal() );
         }
 
         for ( size_t i = 0; i < indexNamesToDrop.size(); i++ ) {
             string indexName = indexNamesToDrop[i];
             IndexDescriptor* desc = findIndexByName( indexName, true );
-            verify( desc );
+            invariant( desc );
             LOG(1) << "\t dropAllIndexes dropping: " << desc->toString();
             IndexCatalogEntry* entry = _entries.find( desc );
-            verify( entry );
+            invariant( entry );
             _dropIndex( entry );
         }
 
@@ -741,7 +747,7 @@ namespace mongo {
             if ( systemIndexes ) {
                 EqualityMatchExpression expr;
                 BSONObj nsBSON = BSON( "ns" << _collection->ns() );
-                verify( expr.init( "ns", nsBSON.firstElement() ).isOK() );
+                invariant( expr.init( "ns", nsBSON.firstElement() ).isOK() );
                 numSystemIndexesEntries = systemIndexes->countTableScan( &expr );
             }
             else {
@@ -791,7 +797,8 @@ namespace mongo {
          */
 
         // ----- SANITY CHECKS -------------
-        verify( entry );
+        if ( !entry )
+            return Status( ErrorCodes::BadValue, "IndexCatalog::_dropIndex passed NULL" );
 
         BackgroundOperation::assertNoBgOpInProgForNs( _collection->ns().ns() );
         _checkMagic();
@@ -810,7 +817,7 @@ namespace mongo {
         string indexName = entry->descriptor()->indexName();
 
         int idxNo = _details->_catalogFindIndexByName( indexName, true );
-        verify( idxNo >= 0 );
+        invariant( idxNo >= 0 );
 
         // --------- START REAL WORK ----------
 
@@ -850,8 +857,8 @@ namespace mongo {
     void IndexCatalog::_deleteIndexFromDisk( const string& indexName,
                                              const string& indexNamespace,
                                              int idxNo ) {
-        verify( idxNo >= 0 );
-        verify( _details->_catalogFindIndexByName( indexName, true ) == idxNo );
+        invariant( idxNo >= 0 );
+        invariant( _details->_catalogFindIndexByName( indexName, true ) == idxNo );
 
         // data + system.namespacesa
         Status status = _collection->_database->_dropNS( indexNamespace );
@@ -893,8 +900,8 @@ namespace mongo {
             IndexDescriptor desc( _collection, spec );
 
             int idxNo = _details->_catalogFindIndexByName( desc.indexName(), true );
-            verify( idxNo >= 0 );
-            verify( idxNo >= numIndexesReady() );
+            invariant( idxNo >= 0 );
+            invariant( idxNo >= numIndexesReady() );
 
             _deleteIndexFromDisk( desc.indexName(),
                                   desc.indexNamespace(),
@@ -932,7 +939,7 @@ namespace mongo {
 
     bool IndexCatalog::isMultikey( const IndexDescriptor* idx ) {
         IndexCatalogEntry* entry = _entries.find( idx );
-        verify( entry );
+        invariant( entry );
         return entry->isMultikey();
     }
 
@@ -979,7 +986,7 @@ namespace mongo {
     }
 
     IndexAccessMethod* IndexCatalog::IndexIterator::accessMethod( IndexDescriptor* desc ) {
-        verify( desc == _prev->descriptor() );
+        invariant( desc == _prev->descriptor() );
         return _prev->accessMethod();
     }
 
@@ -1069,35 +1076,6 @@ namespace mongo {
         return entry->accessMethod();
     }
 
-    IndexAccessMethod* IndexCatalog::getBtreeIndex( const IndexDescriptor* desc ) {
-        IndexCatalogEntry* entry = _entries.find( desc );
-        massert( 17335, "cannot find index entry", entry );
-        if ( !entry->forcedBtreeIndex() ) {
-            entry->setForcedBtreeIndex( new BtreeAccessMethod( entry ) );
-        }
-        return entry->forcedBtreeIndex();
-    }
-
-    BtreeBasedAccessMethod* IndexCatalog::getBtreeBasedIndex( const IndexDescriptor* desc ) {
-
-        string type = _getAccessMethodName(desc->keyPattern());
-
-        if (IndexNames::HASHED == type ||
-            IndexNames::GEO_2DSPHERE == type ||
-            IndexNames::TEXT == type ||
-            IndexNames::GEO_HAYSTACK == type ||
-            "" == type ||
-            IndexNames::GEO_2D == type ) {
-            IndexAccessMethod* iam = getIndex( desc );
-            return dynamic_cast<BtreeBasedAccessMethod*>( iam );
-        }
-
-        error() << "getBtreeBasedIndex with a non btree index (" << type << ")";
-        verify(0);
-        return NULL;
-    }
-
-
     IndexAccessMethod* IndexCatalog::_createAccessMethod( const IndexDescriptor* desc,
                                                           IndexCatalogEntry* entry ) {
         string type = _getAccessMethodName(desc->keyPattern());
@@ -1121,13 +1099,13 @@ namespace mongo {
             return new TwoDAccessMethod( entry );
 
         log() << "Can't find index for keypattern " << desc->keyPattern();
-        verify(0);
+        invariant(0);
         return NULL;
     }
 
     IndexDetails* IndexCatalog::_getIndexDetails( const IndexDescriptor* descriptor ) const {
         int idxNo = _details->_catalogFindIndexByName( descriptor->indexName(), true );
-        verify( idxNo >= 0 );
+        invariant( idxNo >= 0 );
         return &_details->idx( idxNo );
     }
 

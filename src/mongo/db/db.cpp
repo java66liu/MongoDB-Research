@@ -943,7 +943,12 @@ static int mongoDbMain(int argc, char* argv[], char **envp) {
     if( argc == 1 )
         cout << dbExecCommand << " --help for help and startup options" << endl;
 
-    mongo::runGlobalInitializersOrDie(argc, argv, envp);
+    Status status = mongo::runGlobalInitializers(argc, argv, envp);
+    if (!status.isOK()) {
+        severe() << "Failed global initialization: " << status;
+        ::_exit(EXIT_FAILURE);
+    }
+
     startupConfigActions(std::vector<std::string>(argv, argv + argc));
     cmdline_utils::censorArgvArray(argc, argv);
 
@@ -1088,6 +1093,7 @@ namespace mongo {
         sigaddset( &asyncSignals, SIGINT );
         sigaddset( &asyncSignals, SIGTERM );
         sigaddset( &asyncSignals, SIGUSR1 );
+        sigaddset( &asyncSignals, SIGXCPU );
 
         set_terminate( myterminate );
         set_new_handler( my_new_handler );

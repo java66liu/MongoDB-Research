@@ -60,6 +60,7 @@
 #include "mongo/db/json.h"
 #include "mongo/db/kill_current_op.h"
 #include "mongo/db/lasterror.h"
+#include "mongo/db/matcher.h"
 #include "mongo/db/mongod_options.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/ops/count.h"
@@ -624,6 +625,18 @@ namespace mongo {
             uasserted( 17009, status.reason() );
         }
 
+        const NamespaceString requestNs(ns);
+        CanonicalQuery* cqRaw;
+        status = CanonicalQuery::canonicalize(requestNs, query, &cqRaw);
+        if (status == ErrorCodes::NoClientContext) {
+            cqRaw = NULL;
+        }
+        else if (!status.isOK()) {
+            uasserted(17349,
+                      "could not canonicalize query " + query.toString() + "; " + causedBy(status));
+        }
+        std::auto_ptr<CanonicalQuery> cq(cqRaw);
+
         Lock::DBWrite lk(ns.ns());
 
         // void ReplSetImpl::relinquish() uses big write lock so this is thus
@@ -637,7 +650,16 @@ namespace mongo {
 
         Client::Context ctx( ns );
 
-        const NamespaceString requestNs(ns);
+        if (!cq.get()) {
+            status = CanonicalQuery::canonicalize(requestNs, query, &cqRaw);
+            if (!status.isOK()) {
+                uasserted(17350,
+                          "could not canonicalize query " + query.toString() + "; " +
+                          causedBy(status));
+            }
+            cq.reset(cqRaw);
+        }
+
         UpdateRequest request(requestNs);
 
         request.setUpsert(upsert);
@@ -647,7 +669,7 @@ namespace mongo {
         request.setUpdateOpLog(); // TODO: This is wasteful if repl is not active.
         UpdateLifecycleImpl updateLifecycle(broadcast, requestNs);
         request.setLifecycle(&updateLifecycle);
-        UpdateResult res = update(request, &op.debug(), &driver);
+        UpdateResult res = update(request, &op.debug(), &driver, cq.release());
 
         // for getlasterror
         lastError.getSafe()->recordUpdate( res.existing , res.numMatched , res.upserted );

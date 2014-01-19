@@ -10,7 +10,9 @@ var _batch_api_module = (function() {
 
   // Error codes
   var UNKNOWN_ERROR = 8;
-  var WRITE_CONCERN_ERROR = 64;
+  var WRITE_CONCERN_FAILED = 64;
+  var UNKNOWN_REPL_WRITE_CONCERN = 79;
+  var NOT_MASTER = 10107;
 
   // Constants
   var IndexCollPattern = new RegExp('system\.indexes$');
@@ -41,12 +43,15 @@ var _batch_api_module = (function() {
     if(options.fsync) cmd.fsync = options.fsync;
 
     // Execute the getLastErrorCommand
-    var res = db.runCommand( cmd );
+    return db.runCommand( cmd );
+  };
 
-    if(res.ok == 0)
-        throw "getlasterror failed: " + tojson( res );
-    return res;
-  }
+  var enforceWriteConcern = function(db, options) {
+    // Reset previous errors so we can apply the write concern no matter what
+    // as long as it is valid.
+    db.runCommand({ resetError: 1 });
+    return executeGetLastError(db, options);
+  };
 
   /**
    * Wraps the result for write commands and presents a convenient api for accessing
@@ -58,12 +63,16 @@ var _batch_api_module = (function() {
     defineReadOnlyProperty(this, "nInserted", bulkResult.nInserted);
     defineReadOnlyProperty(this, "nUpserted", bulkResult.nUpserted);
     defineReadOnlyProperty(this, "nUpdated", bulkResult.nUpdated);
-    defineReadOnlyProperty(this, "nModified", bulkResult.nUpserted);
+    defineReadOnlyProperty(this, "nModified", bulkResult.nModified);
     defineReadOnlyProperty(this, "nRemoved", bulkResult.nRemoved);
 
     //
     // Define access methods
     this.getUpsertedId = function() {
+      if (bulkResult.upserted.length == 0) {
+        return null;
+      }
+
       return bulkResult.upserted[bulkResult.upserted.length - 1];
     };
 
@@ -87,8 +96,11 @@ var _batch_api_module = (function() {
       }
     };
 
-    this.tojson = function() {
-      return bulkResult;
+    /**
+     * @return {string}
+     */
+    this.tojson = function(indent, nolint) {
+      return tojson(bulkResult, indent, nolint);
     };
 
     this.toString = function() {
@@ -113,7 +125,7 @@ var _batch_api_module = (function() {
     defineReadOnlyProperty(this, "nInserted", bulkResult.nInserted);
     defineReadOnlyProperty(this, "nUpserted", bulkResult.nUpserted);
     defineReadOnlyProperty(this, "nUpdated", bulkResult.nUpdated);
-    defineReadOnlyProperty(this, "nModified", bulkResult.nUpserted);
+    defineReadOnlyProperty(this, "nModified", bulkResult.nModified);
     defineReadOnlyProperty(this, "nRemoved", bulkResult.nRemoved);
 
     //
@@ -165,15 +177,20 @@ var _batch_api_module = (function() {
           var err = bulkResult.writeConcernErrors[i];
           errmsg = errmsg + err.errmsg;
           // TODO: Something better
-          if(i == 0) errmsg = errmsg + " and ";
+          if (i != bulkResult.writeConcernErrors.length - 1) {
+            errmsg = errmsg + " and ";
+          }
         }
 
-        return new WriteConcernError({ errmsg : errmsg, code : WRITE_CONCERN_ERROR });
+        return new WriteConcernError({ errmsg : errmsg, code : WRITE_CONCERN_FAILED });
       }
     }
 
-    this.tojson = function() {
-      return bulkResult;
+    /**
+     * @return {string}
+     */
+    this.tojson = function(indent, nolint) {
+      return tojson(bulkResult, indent, nolint);
     }
 
     this.toString = function() {
@@ -213,8 +230,11 @@ var _batch_api_module = (function() {
       return err.op;
     }
 
-    this.tojson = function() {
-      return err;
+    /**
+     * @return {string}
+     */
+    this.tojson = function(indent, nolint) {
+      return tojson(err, indent, nolint);
     }
 
     this.toString = function() {
@@ -234,14 +254,18 @@ var _batch_api_module = (function() {
 
     // Define properties
     defineReadOnlyProperty(this, "code", err.code);
+    defineReadOnlyProperty(this, "errInfo", err.errInfo);
     defineReadOnlyProperty(this, "errmsg", err.errmsg);
 
-    this.tojson = function() {
-      return err;
+    /**
+     * @return {string}
+     */
+    this.tojson = function(indent, nolint) {
+      return tojson(err, indent, nolint);
     }
 
     this.toString = function() {
-      return "WriteConcernError(" + err.errmsg + ")";
+      return "WriteConcernError(" + tojson(err) + ")";
     }
 
     this.shellPrint = function() {
@@ -374,9 +398,8 @@ var _batch_api_module = (function() {
      * @param document {Object} the document to insert.
      */
     this.insert = function(document) {
-      if (!collection.getMongo().useWriteCommands() && !IndexCollPattern.test(namespace)) {
-        // Validation is done on server for write commands.
-        DBCollection._validateForStorage(document);
+      if (!IndexCollPattern.test(namespace)) {
+        collection._validateForStorage(document);
       }
 
       return addToOperationsList(INSERT, document);
@@ -386,10 +409,7 @@ var _batch_api_module = (function() {
     // Find based operations
     var findOperations = {
       update: function(updateDocument) {
-        if (!collection.getMongo().useWriteCommands()) {
-          // Validation is done on server for write commands.
-          DBCollection._validateUpdateDoc(updateDocument);
-        }
+        collection._validateUpdateDoc(updateDocument);
 
         // Set the top value for the update 0 = multi true, 1 = multi false
         var upsert = typeof currentOp.upsert == 'boolean' ? currentOp.upsert : false;
@@ -408,10 +428,7 @@ var _batch_api_module = (function() {
       },
 
       updateOne: function(updateDocument) {
-        if (!collection.getMongo().useWriteCommands()) {
-          // Validation is done on server for write commands.
-          DBCollection._validateUpdateDoc(updateDocument);
-        }
+        collection._validateUpdateDoc(updateDocument);
 
         // Set the top value for the update 0 = multi true, 1 = multi false
         var upsert = typeof currentOp.upsert == 'boolean' ? currentOp.upsert : false;
@@ -440,10 +457,7 @@ var _batch_api_module = (function() {
       },
 
       removeOne: function() {
-        if (!collection.getMongo().useWriteCommands()) {
-          // Validation is done on server for write commands.
-          DBCollection._validateRemoveDoc(currentOp.selector);
-        }
+        collection._validateRemoveDoc(currentOp.selector);
 
         // Establish the update command
         var document = {
@@ -458,10 +472,7 @@ var _batch_api_module = (function() {
       },
 
       remove: function() {
-        if (!collection.getMongo().useWriteCommands()) {
-          // Validation is done on server for write commands.
-          DBCollection._validateRemoveDoc(currentOp.selector);
-        }
+        collection._validateRemoveDoc(currentOp.selector);
 
         // Establish the update command
         var document = {
@@ -536,7 +547,7 @@ var _batch_api_module = (function() {
 
       // If we have an update Batch type
       if(batch.batchType == UPDATE) {
-        var nModified = result.nDocsModified ? result.nDocsModified : 0;
+        var nModified = ('nModified' in result)? result.nModified: 0;
         bulkResult.nUpserted = bulkResult.nUpserted + nUpserted;
         bulkResult.nUpdated = bulkResult.nUpdated + (result.n - nUpserted);
         bulkResult.nModified = bulkResult.nModified + nModified;
@@ -639,20 +650,103 @@ var _batch_api_module = (function() {
                                      _legacyOp.operation.q,
                                      options.single);
       }
-
-      // Retrieve the lastError object
-      return executeGetLastError(collection.getDB(), writeConcern);
     }
+
+    /**
+     * Parses the getLastError response and properly sets the write errors and
+     * write concern errors.
+     * Should kept be up to date with BatchSafeWriter::extractGLEErrors.
+     *
+     * @return {object} an object with the format:
+     *
+     * {
+     *   writeError: {object|null} raw write error object without the index.
+     *   wcError: {object|null} raw write concern error object.
+     * }
+     */
+    var extractGLEErrors = function(gleResponse) {
+      var isOK = gleResponse.ok? true : false;
+      var err = (gleResponse.err)? gleResponse.err : '';
+      var errMsg = (gleResponse.errmsg)? gleResponse.errmsg : '';
+      var wNote = (gleResponse.wnote)? gleResponse.wnote : '';
+      var jNote = (gleResponse.jnote)? gleResponse.jnote : '';
+      var code = gleResponse.code;
+      var timeout = gleResponse.wtimeout? true : false;
+
+      var extractedErr = { writeError: null, wcError: null };
+
+      if (err == 'norepl' || err == 'noreplset') {
+        // Know this is legacy gle and the repl not enforced - write concern error in 2.4.
+        var errObj = { code: WRITE_CONCERN_FAILED };
+
+        if (errMsg != '') {
+          errObj.errmsg = errMsg;
+        }
+        else if (wNote != '') {
+          errObj.errmsg = wNote;
+        }
+        else {
+          errObj.errmsg = err;
+        }
+
+        extractedErr.wcError = errObj;
+      }
+      else if (timeout) {
+        // Know there was not write error.
+        var errObj = { code: WRITE_CONCERN_FAILED };
+
+        if (errMsg != '') {
+          errObj.errmsg = errMsg;
+        }
+        else {
+          errObj.errmsg = err;
+        }
+
+        errObj.errInfo = { wtimeout: true };
+        extractedErr.wcError = errObj;
+      }
+      else if (code == 19900 || // No longer primary
+               code == 16805 || // replicatedToNum no longer primary
+               code == 14330 || // gle wmode changed; invalid
+               code == NOT_MASTER ||
+               code == UNKNOWN_REPL_WRITE_CONCERN ||
+               code == WRITE_CONCERN_FAILED) {
+        extractedErr.wcError = {
+          code: code,
+          errmsg: errMsg
+        };
+      }
+      else if (!isOK) {
+        throw Error('Unexpected error from getLastError: ' + tojson(gleResponse));
+      }
+      else if (err != '') {
+        extractedErr.writeError = {
+          code: (code == 0)? UNKNOWN_ERROR : code,
+          errmsg: err
+        };
+      }
+      else if (jNote != '') {
+        extractedErr.writeError = {
+          code: WRITE_CONCERN_FAILED,
+          errmsg: jNote
+        };
+      }
+
+      // Handling of writeback not needed for mongo shell.
+      return extractedErr;
+    };
 
     // Execute the operations, serially
     var executeBatchWithLegacyOps = function(batch) {
 
       var batchResult = {
           n: 0
-        , nDocsModified: 0
+        , nModified: 0
         , writeErrors: []
         , upserted: []
       };
+
+      var extractedError = null;
 
       var totalToExecute = batch.operations.length;
       // Run over all the operations
@@ -661,49 +755,25 @@ var _batch_api_module = (function() {
         if(batchResult.writeErrors.length > 0 && ordered) break;
 
         var _legacyOp = new LegacyOp(batch.batchType, batch.operations[i], i);
-        var result = executeLegacyOp(_legacyOp);
+        executeLegacyOp(_legacyOp);
 
-        // Result is replication issue, rewrite error to match write command
-        if(result.wnote || result.wtimeout || result.jnote) {
+        var result = executeGetLastError(collection.getDB(), { w: 1 });
+        extractedError = extractGLEErrors(result);
 
-          // If we are ordered and have a jnote or wnote throw to be compatible
-          // with write command behavior on pre 2.6
-          if(ordered && (result.jnote || result.wnote || result.wtimeout)) {
-            throw "legacy batch failed, cannot aggregate results: " + result.errmsg;
-          }
-
-          // Sometimes, with replication, we get an errmsg *and* wnote/jnote/wtimeout
-          // Ensure we get the right error message
-          errmsg = result.wnote || errmsg;
-          errmsg = result.jnote || errmsg;
-
-          bulkResult.writeConcernErrors.push({ errmsg: errmsg, code: WRITE_CONCERN_ERROR });
-        } else {
-          if(result.ok == 0) {
-            throw "legacy batch failed, cannot aggregate results: " + result.errmsg;
-          }
-        }
-
-        // Handle error (it's only a write error if there is no wnote/jnote or wtimeout)
-        if(result.err != null
-          && (result.wnote == null && result.jnote == null && result.wtimeout == null)) {
-          var code = result.code || UNKNOWN_ERROR; // Returned error code or unknown code
-          var errmsg = result.errmsg || result.err;
-
+        if (extractedError.writeError != null) {
           // Create the emulated result set
           var errResult = {
               index: _legacyOp.index
-            , code: code
-            , errmsg: errmsg
+            , code: extractedError.writeError.code
+            , errmsg: extractedError.writeError.errmsg
             , op: batch.operations[_legacyOp.index]
           };
 
           batchResult.writeErrors.push(errResult);
-
-        } else if(_legacyOp.batchType == INSERT) {
+        }
+        else if(_legacyOp.batchType == INSERT) {
           // Inserts don't give us "n" back, so we can only infer
-          if(result.code == null)
-            batchResult.n = batchResult.n + 1;
+          batchResult.n = batchResult.n + 1;
         }
 
         if(_legacyOp.batchType == UPDATE) {
@@ -715,13 +785,24 @@ var _batch_api_module = (function() {
             });
           } else if(result.n) {
             batchResult.n = batchResult.n + result.n;
-            batchResult.nDocsModified = batchResult.nDocsModified + result.n;
           }
         }
 
         if(_legacyOp.batchType == REMOVE && result.n) {
           batchResult.n = batchResult.n + result.n;
         }
+      }
+
+      // The write concern may have not been enforced if we did it earlier and a write
+      // error occurs, so we apply the actual write concern at the end.
+      if (batchResult.writeErrors.length == 0 ||
+              !ordered && (batchResult.writeErrors.length < batch.operations.length)) {
+        result = enforceWriteConcern(collection.getDB(), writeConcern);
+        extractedError = extractGLEErrors(result);
+      }
+
+      if (extractedError != null && extractedError.wcError != null) {
+        bulkResult.writeConcernErrors.push(extractedError.wcError);
       }
 
       // Merge the results
@@ -777,7 +858,7 @@ if ( ( typeof WriteConcern ) == 'undefined' ){
      *  j: write durably written to journal
      *  w: write replicated to number of servers
      *  wtimeout: how long to wait for replication
-     * 
+     *
      * Accepts { w : x, j : x, wtimeout : x } or w, j, wtimeout
      */
     WriteConcern = function( wValue, jValue, wTimeout ){
@@ -797,12 +878,24 @@ if ( ( typeof WriteConcern ) == 'undefined' ){
         this._wTimeout = NumberInt( wTimeout ).toNumber();
     };
 
-    WriteConcern.prototype.tojson = function() {
+    /**
+     * @return {object} the object representation of this object. Use tojson (small caps) to get
+     *     the string representation instead.
+     */
+    WriteConcern.prototype.toJSON = function() {
         return { w : this._w, j : this._j, wtimeout : this._wTimeout };
     };
 
+    /**
+     * @return {string} the string representation of this object. Use toJSON (capitalized) to get
+     *     the object representation instead.
+     */
+    WriteConcern.prototype.tojson = function(indent, nolint) {
+        return tojson(this.toJSON(), indent, nolint);
+    };
+
     WriteConcern.prototype.toString = function() {
-        return "WriteConcern(" + tojson( this.tojson() ) + ")";
+        return "WriteConcern(" + this.tojson() + ")";
     };
 
     WriteConcern.prototype.shellPrint = function() {

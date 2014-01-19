@@ -18,7 +18,6 @@
 #include "mongo/pch.h"
 
 #include "mongo/db/d_concurrency.h"
-#include "mongo/db/memconcept.h"
 #include "mongo/db/storage/durable_mapped_file.h"
 #include "mongo/util/file_allocator.h"
 #include "mongo/util/mmap.h"
@@ -72,7 +71,7 @@ namespace mongo {
     }
 
     MemoryMappedFile::MemoryMappedFile()
-        : _flushMutex(new mutex("flushMutex")) {
+        : _flushMutex(new mutex("flushMutex")), _uniqueId(0) {
         fd = 0;
         maphandle = 0;
         len = 0;
@@ -82,7 +81,6 @@ namespace mongo {
     void MemoryMappedFile::close() {
         LockMongoFilesShared::assertExclusivelyLocked();
         for( vector<void*>::iterator i = views.begin(); i != views.end(); i++ ) {
-            memconcept::invalidate(*i);
             clearWritableBits(*i);
             UnmapViewOfFile(*i);
         }
@@ -117,7 +115,6 @@ namespace mongo {
                     << endl;
             fassertFailed( 16165 );
         }
-        memconcept::is( readOnlyMapAddress, memconcept::concept::other, filename() );
         views.push_back( readOnlyMapAddress );
         return readOnlyMapAddress;
     }
@@ -211,7 +208,6 @@ namespace mongo {
             }
         }
         views.push_back(view);
-        memconcept::is(view, memconcept::concept::memorymappedfile, this->filename(), (unsigned) length);
         len = length;
         return view;
     }
@@ -290,7 +286,6 @@ namespace mongo {
         }
         clearWritableBits( privateMapAddress );
         views.push_back( privateMapAddress );
-        memconcept::is( privateMapAddress, memconcept::concept::memorymappedfile, filename() );
         return privateMapAddress;
     }
 

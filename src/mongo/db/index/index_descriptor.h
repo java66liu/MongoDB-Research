@@ -30,10 +30,10 @@
 
 #include <string>
 
-#include "mongo/db/storage/index_details.h"  // For IndexDetails.
+#include "mongo/db/structure/catalog/index_details.h"  // For IndexDetails.
 #include "mongo/db/jsobj.h"
-#include "mongo/db/namespace_details.h"  // For NamespaceDetails.
-#include "mongo/db/structure/collection.h"
+#include "mongo/db/structure/catalog/namespace_details.h"  // For NamespaceDetails.
+#include "mongo/db/catalog/collection.h"
 
 #include "mongo/util/stacktrace.h"
 

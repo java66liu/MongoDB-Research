@@ -29,161 +29,13 @@
 #include "mongo/db/query/plan_cache.h"
 
 #include <algorithm>
+#include <math.h>
 #include <memory>
-#include <sstream>
 #include "boost/thread/locks.hpp"
 #include "mongo/db/query/plan_ranker.h"
 #include "mongo/db/query/query_solution.h"
 #include "mongo/db/query/qlog.h"
-
-namespace {
-
-    using std::auto_ptr;
-    using std::ostream;
-    using std::string;
-    using std::stringstream;
-    using namespace mongo;
-
-    void encodePlanCacheKeyTree(const MatchExpression* tree, ostream* os);
-
-    /**
-     * Comparator for MatchExpression nodes. nodes by:
-     * 1) operator type (MatchExpression::MatchType)
-     * 2) path name (MatchExpression::path())
-     * 3) cache key of the subtree
-     *
-     * The third item is needed to break ties, thus ensuring that
-     * match expression trees which should have the same cache key
-     * always sort the same way. If you're wondering when the tuple
-     * (operator type, path name) could ever be equal, consider this
-     * query:
-     *
-     * {$and:[{$or:[{a:1},{a:2}]},{$or:[{b:1},{b:2}]}]}
-     *
-     * The two OR nodes would compare as equal in this case were it
-     * not for tuple item #3 (cache key of the subtree).
-     */
-    bool OperatorAndFieldNameComparison(const MatchExpression* lhs, const MatchExpression* rhs) {
-        // First compare by MatchType
-        MatchExpression::MatchType lhsMatchType = lhs->matchType();
-        MatchExpression::MatchType rhsMatchType = rhs->matchType();
-        if (lhsMatchType != rhsMatchType) {
-            return lhsMatchType < rhsMatchType;
-        }
-        // Second, path.
-        StringData lhsPath = lhs->path();
-        StringData rhsPath = rhs->path();
-        if (lhsPath != rhsPath) {
-            return lhsPath < rhsPath;
-        }
-        // Third, cache key.
-        stringstream ssLeft, ssRight;
-        encodePlanCacheKeyTree(lhs, &ssLeft);
-        encodePlanCacheKeyTree(rhs, &ssRight);
-        return ssLeft.str() < ssRight.str();
-    }
-
-    /**
-     * 2-character encoding of MatchExpression::MatchType.
-     */
-    const char* encodeMatchType(MatchExpression::MatchType mt) {
-        switch(mt) {
-        case MatchExpression::AND: return "an"; break;
-        case MatchExpression::OR: return "or"; break;
-        case MatchExpression::NOR: return "nr"; break;
-        case MatchExpression::NOT: return "nt"; break;
-        case MatchExpression::ALL: return "al"; break;
-        case MatchExpression::ELEM_MATCH_OBJECT: return "eo"; break;
-        case MatchExpression::ELEM_MATCH_VALUE: return "ev"; break;
-        case MatchExpression::SIZE: return "sz"; break;
-        case MatchExpression::LTE: return "le"; break;
-        case MatchExpression::LT: return "lt"; break;
-        case MatchExpression::EQ: return "eq"; break;
-        case MatchExpression::GT: return "gt"; break;
-        case MatchExpression::GTE: return "ge"; break;
-        case MatchExpression::REGEX: return "re"; break;
-        case MatchExpression::MOD: return "mo"; break;
-        case MatchExpression::EXISTS: return "ex"; break;
-        case MatchExpression::MATCH_IN: return "in"; break;
-        case MatchExpression::NIN: return "ni"; break;
-        case MatchExpression::TYPE_OPERATOR: return "ty"; break;
-        case MatchExpression::GEO: return "go"; break;
-        case MatchExpression::WHERE: return "wh"; break;
-        case MatchExpression::ATOMIC: return "at"; break;
-        case MatchExpression::ALWAYS_FALSE: return "af"; break;
-        case MatchExpression::GEO_NEAR: return "gn"; break;
-        case MatchExpression::TEXT: return "te"; break;
-        }
-        // Unreachable code.
-        // All MatchType values have been handled in switch().
-        verify(0);
-        return "";
-    }
-
-    /**
-     * Traverses expression tree pre-order.
-     * Appends an encoding of each node's match type and path name
-     * to the output stream.
-     */
-    void encodePlanCacheKeyTree(const MatchExpression* tree, ostream* os) {
-        // Encode match type and path.
-        *os << encodeMatchType(tree->matchType()) << tree->path();
-        // Traverse child nodes.
-        for (size_t i = 0; i < tree->numChildren(); ++i) {
-            encodePlanCacheKeyTree(tree->getChild(i), os);
-        }
-    }
-
-    /**
-     * Encodes sort order into cache key.
-     * Sort order is normalized because it provided by
-     * LiteParsedQuery.
-     */
-    void encodePlanCacheKeySort(const BSONObj& sortObj, ostream* os) {
-        BSONObjIterator it(sortObj);
-        while (it.more()) {
-            BSONElement elt = it.next();
-            // $meta text score
-            if (LiteParsedQuery::isTextScoreMeta(elt)) {
-                *os << "t";
-            }
-            // Ascending
-            else if (elt.numberInt() == 1) {
-                *os << "a";
-            }
-            // Descending
-            else {
-                *os << "d";
-            }
-            *os << elt.fieldName();
-        }
-    }
-
-    /**
-     * Encodes parsed projection into cache key.
-     * Does a simple toString() on each projected field
-     * in the BSON object.
-     * This handles all the special projection types ($meta, $elemMatch, etc.)
-     */
-    void encodePlanCacheKeyProj(const BSONObj& projObj, ostream* os) {
-        if (projObj.isEmpty()) {
-            return;
-        }
-
-        *os << "p";
-
-        BSONObjIterator it(projObj);
-        while (it.more()) {
-            BSONElement elt = it.next();
-            // BSONElement::toString() arguments
-            // includeFieldName - skip field name (appending after toString() result). false.
-            // full: choose less verbose representation of child/data values. false.
-            *os << elt.toString(false, false);
-            *os << elt.fieldName();
-        }
-    }
-
-} // namespace
+#include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
 
@@ -224,36 +76,13 @@ namespace mongo {
         return true;
     }
 
-    /**
-     * For every non-leaf node, sorts child nodes by (MatchType, path name).
-     */
-    void PlanCache::normalizeQueryForCache(CanonicalQuery* queryOut) {
-        // Sorting is the only normalization for now.
-        PlanCache::sortTree(queryOut->root());
-    }
-
-    /**
-     * Cache key is a string-ified combination of the query and sort obfuscated
-     * for minimal user comprehension.
-     */
-    PlanCacheKey PlanCache::getPlanCacheKey(const CanonicalQuery& query) {
-        stringstream ss;
-        encodePlanCacheKeyTree(query.root(), &ss);
-        encodePlanCacheKeySort(query.getParsed().getSort(), &ss);
-        encodePlanCacheKeyProj(query.getParsed().getProj(), &ss);
-        PlanCacheKey key(ss.str());
-        return key;
-    }
-
     //
     // CachedSolution
     //
 
     CachedSolution::CachedSolution(const PlanCacheKey& key, const PlanCacheEntry& entry)
         : plannerData(entry.plannerData.size()),
-          pinned(entry.pinned),
-          pinnedIndex(entry.pinnedIndex),
-          shunnedIndexes(entry.shunnedIndexes),
+          backupSoln(entry.backupSoln),
           key(key),
           query(entry.query.copy()),
           sort(entry.sort.copy()),
@@ -274,26 +103,6 @@ namespace mongo {
         }
     }
 
-    size_t CachedSolution::getWinnerIndex() const {
-        // Choose pinned plan always (even if shunned).
-        if (pinned) {
-            verify(pinnedIndex < plannerData.size());
-            return pinnedIndex;
-        }
-
-        // Cached solution should contain at least one unshunned plan.
-        verify(shunnedIndexes.size() < plannerData.size());
-        for (size_t i = 0; i < plannerData.size(); ++i) {
-            if (shunnedIndexes.find(i) == shunnedIndexes.end()) {
-                return i;
-            }
-        }
-
-        // Unreachable code.
-        verify(0);
-        return 0;
-    }
-
     //
     // PlanCacheEntry
     //
@@ -312,8 +121,6 @@ namespace mongo {
         }
 
         decision.reset(d);
-        pinned = false;
-        pinnedIndex = 0;
     }
 
     PlanCacheEntry::~PlanCacheEntry() {
@@ -326,16 +133,26 @@ namespace mongo {
     }
 
     string PlanCacheEntry::toString() const {
-        stringstream ss;
-        ss << "pinned?: " << pinned << endl;
-        return ss.str();
+        mongoutils::str::stream ss;
+        ss << "(query: " << query.toString()
+           << ";sort: " << sort.toString()
+           << ";projection: " << projection.toString()
+           << ";solutions: " << plannerData.size()
+           << ")";
+        return ss;
     }
 
     string CachedSolution::toString() const {
-        stringstream ss;
-        ss << "key: " << key << endl;
-        return ss.str();
+        mongoutils::str::stream ss;
+        ss << "key: " << key << '\n';
+        return ss;
     }
+
+    // static
+    const size_t PlanCacheEntry::kMaxFeedback = 20;
+
+    // static
+    const double PlanCacheEntry::kStdDevThreshold = 2.0;
 
     //
     // PlanCacheIndexTree
@@ -361,24 +178,24 @@ namespace mongo {
     }
 
     std::string PlanCacheIndexTree::toString(int indents) const {
-        std::stringstream ss;
+        mongoutils::str::stream ss;
         if (!children.empty()) {
-            ss << string(3 * indents, '-') << "Node" << std::endl;
+            ss << string(3 * indents, '-') << "Node\n";
             int newIndent = indents + 1;
             for (vector<PlanCacheIndexTree*>::const_iterator it = children.begin();
                     it != children.end(); ++it) {
                 ss << (*it)->toString(newIndent);
             }
-            return ss.str();
+            return ss;
         }
         else {
             ss << string(3 * indents, '-') << "Leaf ";
             if (NULL != entry.get()) {
                 ss << entry->keyPattern.toString() << ", pos: " << index_pos;
             }
-            ss << std::endl;
+            ss << '\n';
         }
-        return ss.str();
+        return ss;
     }
 
     //
@@ -394,11 +211,12 @@ namespace mongo {
         }
         other->solnType = this->solnType;
         other->wholeIXSolnDir = this->wholeIXSolnDir;
+        other->adminHintApplied = this->adminHintApplied;
         return other;
     }
 
     std::string SolutionCacheData::toString() const {
-        stringstream ss;
+        mongoutils::str::stream ss;
         switch (this->solnType) {
         case WHOLE_IXSCAN_SOLN:
             verify(this->tree.get());
@@ -416,7 +234,7 @@ namespace mongo {
                << "tree=" << this->tree->toString()
                << ")";
         }
-        return ss.str();
+        return ss;
     }
 
     //
@@ -435,17 +253,27 @@ namespace mongo {
             return Status(ErrorCodes::BadValue, "no solutions provided");
         }
 
-        PlanCacheKey key = getPlanCacheKey(query);
         PlanCacheEntry* entry = new PlanCacheEntry(solns, why);
         const LiteParsedQuery& pq = query.getParsed();
         entry->query = pq.getFilter().copy();
         entry->sort = pq.getSort().copy();
         entry->projection = pq.getProj().copy();
 
+        // If the winning solution uses a blocking sort, then try and
+        // find a fallback solution that has no blocking sort.
+        if (solns[0]->hasSortStage) {
+            for (size_t i = 1; i < solns.size(); ++i) {
+                if (!solns[i]->hasSortStage) {
+                    entry->backupSoln.reset(i);
+                    break;
+                }
+            }
+        }
+
         boost::lock_guard<boost::mutex> cacheLock(_cacheMutex);
-        // XXX: Replacing existing entry - revisit when we have real cached solutions.
-        // Delete previous entry
+        // Replace existing entry.
         typedef unordered_map<PlanCacheKey, PlanCacheEntry*>::const_iterator ConstIterator;
+        const PlanCacheKey& key = query.getPlanCacheKey();
         ConstIterator i = _cache.find(key);
         if (i != _cache.end()) {
             PlanCacheEntry* previousEntry = i->second;
@@ -457,11 +285,7 @@ namespace mongo {
     }
 
     Status PlanCache::get(const CanonicalQuery& query, CachedSolution** crOut) const{
-        PlanCacheKey key = getPlanCacheKey(query);
-        return get(key, crOut);
-    }
-
-    Status PlanCache::get(const PlanCacheKey& key, CachedSolution** crOut) const {
+        const PlanCacheKey& key = query.getPlanCacheKey();
         verify(crOut);
 
         boost::lock_guard<boost::mutex> cacheLock(_cacheMutex);
@@ -478,14 +302,85 @@ namespace mongo {
         return Status::OK();
     }
 
-    Status PlanCache::feedback(const PlanCacheKey& ck, PlanCacheEntryFeedback* feedback) {
-        boost::lock_guard<boost::mutex> cacheLock(_cacheMutex);
-        return Status(ErrorCodes::BadValue, "not implemented yet");
+    // XXX: Figure out what the right policy is here for determining if
+    // the cached solution is bad.
+    static bool hasCachedPlanPerformanceDegraded(PlanCacheEntry* entry,
+                                                 PlanCacheEntryFeedback* latestFeedback) {
+
+        if (!entry->averageScore) {
+            // We haven't computed baseline performance stats for this cached plan yet.
+            // Let's do that now.
+
+            // Compute mean score.
+            double sum = 0;
+            for (size_t i = 0; i < entry->feedback.size(); ++i) {
+                sum += entry->feedback[i]->score;
+            }
+            double mean = sum / entry->feedback.size();
+
+            // Compute std deviation of scores.
+            double sum_of_squares = 0;
+            for (size_t i = 0; i < entry->feedback.size(); ++i) {
+                double iscore = entry->feedback[i]->score;
+                sum_of_squares += (iscore - mean) * (iscore - mean);
+            }
+            double stddev = sqrt(sum_of_squares / (entry->feedback.size() - 1));
+
+            // If the score has gotten more than a standard deviation lower than
+            // its initial value, we should uncache the entry.
+            double initialScore = entry->decision->score;
+            if ((initialScore - mean) > (PlanCacheEntry::kStdDevThreshold * stddev)) {
+                return true;
+            }
+
+            entry->averageScore.reset(mean);
+            entry->stddevScore.reset(stddev);
+        }
+
+        // If the latest use of this plan cache entry is too far from the expected
+        // performance, then we should uncache the entry.
+        if ((*entry->averageScore - latestFeedback->score)
+             > (PlanCacheEntry::kStdDevThreshold * (*entry->stddevScore))) {
+            return true;
+        }
+
+        return false;
     }
 
-    Status PlanCache::remove(const PlanCacheKey& ck) {
+    Status PlanCache::feedback(const CanonicalQuery& cq, PlanCacheEntryFeedback* feedback) {
+        if (NULL == feedback) {
+            return Status(ErrorCodes::BadValue, "feedback is NULL");
+        }
+        std::auto_ptr<PlanCacheEntryFeedback> autoFeedback(feedback);
+
         boost::lock_guard<boost::mutex> cacheLock(_cacheMutex);
         typedef unordered_map<PlanCacheKey, PlanCacheEntry*>::const_iterator ConstIterator;
+        ConstIterator i = _cache.find(cq.getPlanCacheKey());
+        if (i == _cache.end()) {
+            return Status(ErrorCodes::BadValue, "no such key in cache");
+        }
+        PlanCacheEntry* entry = i->second;
+        verify(entry);
+
+        if (entry->feedback.size() >= PlanCacheEntry::kMaxFeedback) {
+            // If we have enough feedback, then use it to determine whether
+            // we should get rid of the cached solution.
+            if (hasCachedPlanPerformanceDegraded(entry, autoFeedback.get())) {
+                _cache.erase(i);
+            }
+        }
+        else {
+            // We don't have enough feedback yet---just store it and move on.
+            entry->feedback.push_back(autoFeedback.release());
+        }
+
+        return Status::OK();
+    }
+
+    Status PlanCache::remove(const CanonicalQuery& canonicalQuery) {
+        boost::lock_guard<boost::mutex> cacheLock(_cacheMutex);
+        typedef unordered_map<PlanCacheKey, PlanCacheEntry*>::const_iterator ConstIterator;
+        const PlanCacheKey& ck = canonicalQuery.getPlanCacheKey();
         ConstIterator i = _cache.find(ck);
         if (i == _cache.end()) {
             return Status(ErrorCodes::BadValue, "no such key in cache");
@@ -503,132 +398,23 @@ namespace mongo {
         _writeOperations.store(0);
     }
 
-    void PlanCache::getKeys(std::vector<PlanCacheKey>* keysOut) const {
-        verify(keysOut);
-
+    std::vector<CachedSolution*> PlanCache::getAllSolutions() const {
         boost::lock_guard<boost::mutex> cacheLock(_cacheMutex);
-        std::vector<PlanCacheKey> keys;
+        std::vector<CachedSolution*> solutions;
         typedef unordered_map<PlanCacheKey, PlanCacheEntry*>::const_iterator ConstIterator;
         for (ConstIterator i = _cache.begin(); i != _cache.end(); i++) {
             const PlanCacheKey& key = i->first;
-            keys.push_back(key);
+            PlanCacheEntry* entry = i->second;
+            CachedSolution* cs = new CachedSolution(key, *entry);
+            solutions.push_back(cs);
         }
 
-        // Replace contents of output vector provided in keysOut.
-        keys.swap(*keysOut);
+        return solutions;
     }
 
-    Status PlanCache::pin(const PlanCacheKey& key, const PlanID& plan) {
+    size_t PlanCache::size() const {
         boost::lock_guard<boost::mutex> cacheLock(_cacheMutex);
-        typedef unordered_map<PlanCacheKey, PlanCacheEntry*>::const_iterator ConstIterator;
-        ConstIterator i = _cache.find(key);
-        if (i == _cache.end()) {
-            return Status(ErrorCodes::BadValue, "no such key in cache");
-        }
-        PlanCacheEntry* entry = i->second;
-        verify(entry);
-
-        // search for plan
-        // XXX: remove when we have real cached plans
-        for (size_t i = 0; i < entry->plannerData.size(); i++) {
-            stringstream ss;
-            ss << "plan" << i;
-            PlanID currentPlan(ss.str());
-            if (currentPlan == plan) {
-                entry->pinned = true;
-                entry->pinnedIndex = i;
-                return Status::OK();
-            }
-        }
-
-        return Status(ErrorCodes::BadValue, "no such plan in cache");
-    }
-
-    Status PlanCache::unpin(const PlanCacheKey& key) {
-        boost::lock_guard<boost::mutex> cacheLock(_cacheMutex);
-        typedef unordered_map<PlanCacheKey, PlanCacheEntry*>::const_iterator ConstIterator;
-        ConstIterator i = _cache.find(key);
-        if (i == _cache.end()) {
-            return Status(ErrorCodes::BadValue, "no such key in cache");
-        }
-        PlanCacheEntry* entry = i->second;
-        verify(entry);
-
-        entry->pinned = false;
-
-        return Status::OK();
-    }
-
-    Status PlanCache::addPlan(const PlanCacheKey& key, const BSONObj& details, PlanID* planOut) {
-        boost::lock_guard<boost::mutex> cacheLock(_cacheMutex);
-        typedef unordered_map<PlanCacheKey, PlanCacheEntry*>::const_iterator ConstIterator;
-        ConstIterator i = _cache.find(key);
-        if (i == _cache.end()) {
-            return Status(ErrorCodes::BadValue, "no such key in cache");
-        }
-        PlanCacheEntry* entry = i->second;
-        verify(entry);
-
-        // XXX: Generate fake plan ID
-        stringstream ss;
-        ss << "plan" << entry->plannerData.size();
-        PlanID plan(ss.str());
-
-        SolutionCacheData* scd = new SolutionCacheData();
-        scd->tree.reset(new PlanCacheIndexTree());
-        entry->plannerData.push_back(scd);
-
-        *planOut = plan;
-        return Status::OK();
-    }
-
-    // static
-    void PlanCache::sortTree(MatchExpression* tree) {
-        for (size_t i = 0; i < tree->numChildren(); ++i) {
-            sortTree(tree->getChild(i));
-        }
-        std::vector<MatchExpression*>* children = tree->getChildVector();
-        if (NULL != children) {
-            std::sort(children->begin(), children->end(), OperatorAndFieldNameComparison);
-        }
-    }
-
-    Status PlanCache::shunPlan(const PlanCacheKey& key, const PlanID& plan) {
-        boost::lock_guard<boost::mutex> cacheLock(_cacheMutex);
-        typedef unordered_map<PlanCacheKey, PlanCacheEntry*>::const_iterator ConstIterator;
-        ConstIterator i = _cache.find(key);
-        if (i == _cache.end()) {
-            return Status(ErrorCodes::BadValue, "no such key in cache");
-        }
-        PlanCacheEntry* entry = i->second;
-        verify(entry);
-
-        if (i == _cache.end()) {
-            return Status(ErrorCodes::BadValue, "no such key in cache");
-        }
-
-        // search for plan
-        for (size_t i = 0; i < entry->plannerData.size(); i++) {
-            stringstream ss;
-            ss << "plan" << i;
-            PlanID currentPlan(ss.str());
-            if (currentPlan == plan) {
-                // Do nothing if plan is already shunned.
-                if (entry->shunnedIndexes.find(i) != entry->shunnedIndexes.end()) {
-                    return Status::OK();
-                }
-
-                // Do not proceed if this is the last unshunned plan.
-                if ((entry->shunnedIndexes.size() + 1U) == entry->plannerData.size()) {
-                    return Status(ErrorCodes::BadValue, "query must have at least one unshunned plan");
-                }
-
-                entry->shunnedIndexes.insert(i);
-                return Status::OK();
-            }
-        }
-
-        return Status(ErrorCodes::BadValue, "no such plan in cache");
+        return _cache.size();
     }
 
     void PlanCache::notifyOfWriteOp() {

@@ -70,7 +70,7 @@ namespace mongo {
     }
 
     string optionString(size_t options) {
-        stringstream ss;
+        mongoutils::str::stream ss;
 
         // These options are all currently mutually exclusive.
         if (QueryPlannerParams::DEFAULT == options) {
@@ -88,7 +88,7 @@ namespace mongo {
         if (options & QueryPlannerParams::NO_BLOCKING_SORT) {
             ss << "NO_BLOCKING_SORT";
         }
-        return ss.str();
+        return ss;
     }
 
     static BSONObj getKeyFromQuery(const BSONObj& keyPattern, const BSONObj& query) {
@@ -176,11 +176,11 @@ namespace mongo {
         if (NULL != taggedTree->getTag()) {
             IndexTag* itag = static_cast<IndexTag*>(taggedTree->getTag());
             if (itag->index >= relevantIndices.size()) {
-                std::stringstream ss;
+                mongoutils::str::stream ss;
                 ss << "Index number is " << itag->index
                    << " but there are only " << relevantIndices.size()
                    << " relevant indices.";
-                return Status(ErrorCodes::BadValue, ss.str());
+                return Status(ErrorCodes::BadValue, ss);
             }
 
             // Make sure not to cache solutions which use '2d' indices.
@@ -228,11 +228,11 @@ namespace mongo {
         verify(NULL == filter->getTag());
 
         if (filter->numChildren() != indexTree->children.size()) {
-            std::stringstream ss;
+            mongoutils::str::stream ss;
             ss << "Cache topology and query did not match: "
                << "query has " << filter->numChildren() << " children "
                << "and cache has " << indexTree->children.size() << " children.";
-            return Status(ErrorCodes::BadValue, ss.str());
+            return Status(ErrorCodes::BadValue, ss);
         }
 
         // Continue the depth-first tree traversal.
@@ -246,9 +246,9 @@ namespace mongo {
         if (NULL != indexTree->entry.get()) {
             map<BSONObj, size_t>::const_iterator got = indexMap.find(indexTree->entry->keyPattern);
             if (got == indexMap.end()) {
-                std::stringstream ss;
+                mongoutils::str::stream ss;
                 ss << "Did not find index with keyPattern: " << indexTree->entry->keyPattern.toString();
-                return Status(ErrorCodes::BadValue, ss.str());
+                return Status(ErrorCodes::BadValue, ss);
             }
             filter->setTag(new IndexTag(got->second, indexTree->index_pos));
         }
@@ -259,20 +259,8 @@ namespace mongo {
     // static
     Status QueryPlanner::planFromCache(const CanonicalQuery& query,
                                        const QueryPlannerParams& params,
-                                       CachedSolution* cachedSoln,
+                                       SolutionCacheData* cacheData,
                                        QuerySolution** out) {
-        verify(cachedSoln);
-        verify(out);
-        verify(PlanCache::shouldCacheQuery(query));
-
-        // Queries not suitable for caching are filtered
-        // in multi plan runner using PlanCache::shouldCacheQuery().
-
-        // Look up winning solution in cached solution's array.
-        size_t solutionIndex = cachedSoln->getWinnerIndex();
-
-        SolutionCacheData* cacheData = cachedSoln->plannerData[solutionIndex];
-
         if (NULL == cacheData) {
             return Status(ErrorCodes::BadValue,
                           "planner data does not exist in the cached solution");
@@ -310,10 +298,6 @@ namespace mongo {
 
         // Create a copy of the expression tree.  We use cachedSoln to annotate this with indices.
         MatchExpression* clone = query.root()->shallowClone();
-
-        // Sort the tree in order to ensure that the sort order
-        // makes that of the cached solution.
-        PlanCache::sortTree(clone);
 
         QLOG() << "Tagging the match expression according to cache data: " << endl
                << "Filter:" << endl << clone->toString()
@@ -354,6 +338,43 @@ namespace mongo {
         }
 
         return Status(ErrorCodes::BadValue, "couldn't plan from cache");
+    }
+
+    // static
+    Status QueryPlanner::planFromCache(const CanonicalQuery& query,
+                                       const QueryPlannerParams& params,
+                                       CachedSolution* cachedSoln,
+                                       QuerySolution** out,
+                                       QuerySolution** backupOut) {
+        verify(cachedSoln);
+        verify(!cachedSoln->plannerData.empty());
+        verify(out);
+        verify(backupOut);
+        verify(PlanCache::shouldCacheQuery(query));
+
+        // If there is no backup solution, then return NULL through
+        // the 'backupOut' out-parameter.
+        *backupOut = NULL;
+
+        // Queries not suitable for caching are filtered
+        // in multi plan runner using PlanCache::shouldCacheQuery().
+
+        // Look up winning solution in cached solution's array.
+        SolutionCacheData* winnerCacheData = cachedSoln->plannerData[0];
+        Status s = planFromCache(query, params, winnerCacheData, out);
+        if (!s.isOK()) {
+            return s;
+        }
+
+        if (cachedSoln->backupSoln) {
+            SolutionCacheData* backupCacheData = cachedSoln->plannerData[*cachedSoln->backupSoln];
+            Status backupStatus = planFromCache(query, params, backupCacheData, backupOut);
+            if (!backupStatus.isOK()) {
+                return backupStatus;
+            }
+        }
+
+        return Status::OK();
     }
 
     // static
@@ -418,7 +439,13 @@ namespace mongo {
         vector<IndexEntry> relevantIndices;
 
         // Hints require us to only consider the hinted index.
-        BSONObj hintIndex = query.getParsed().getHint();
+        // If admin hints in the query settings were used to override
+        // the allowed indices for planning, we should not use the hinted index
+        // requested in the query.
+        BSONObj hintIndex;
+        if (!params.adminHintApplied) {
+            hintIndex = query.getParsed().getHint();
+        }
 
         // Snapshot is a form of a hint.  If snapshot is set, try to use _id index to make a real
         // plan.  If that fails, just scan the _id index.
@@ -667,9 +694,11 @@ namespace mongo {
                 QLOG() << "about to build solntree from tagged tree:\n" << rawTree->toString()
                        << endl;
 
-                // The cached data needs to use a predefined ordering.
+                // The tagged tree produced by the plan enumerator is not guaranteed
+                // to be canonically sorted. In order to be compatible with the cached
+                // data, sort the tagged tree according to CanonicalQuery ordering.
                 boost::scoped_ptr<MatchExpression> clone(rawTree->shallowClone());
-                PlanCache::sortTree(clone.get());
+                CanonicalQuery::sortTree(clone.get());
 
                 PlanCacheIndexTree* cacheData;
                 Status indexTreeStatus = cacheDataFromTaggedTree(clone.get(), relevantIndices, &cacheData);

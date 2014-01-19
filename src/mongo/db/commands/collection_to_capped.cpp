@@ -32,8 +32,10 @@
 #include "mongo/db/client.h"
 #include "mongo/db/clientcursor.h" // XXX-remove
 #include "mongo/db/commands.h"
+#include "mongo/db/index_builder.h"
 #include "mongo/db/instance.h" // XXX-remove
-#include "mongo/db/namespace_details.h"
+#include "mongo/db/pdfile.h"
+#include "mongo/db/structure/catalog/namespace_details.h"
 #include "mongo/db/query/internal_plans.h"
 #include "mongo/db/query/new_find.h"
 #include "mongo/db/repl/oplog.h"
@@ -196,7 +198,20 @@ namespace mongo {
             actions.addAction(ActionType::convertToCapped);
             out->push_back(Privilege(parseResourcePattern(dbname, cmdObj), actions));
         }
+
+        virtual std::vector<BSONObj> stopIndexBuilds(const std::string& dbname,
+                                                     const BSONObj& cmdObj) {
+            std::string systemIndexes = dbname+".system.indexes";
+            std::string coll = cmdObj.firstElement().valuestr();
+            std::string ns = dbname + "." + coll;
+            BSONObj criteria = BSON("ns" << systemIndexes << "op" << "insert" << "insert.ns" << ns);
+
+            return IndexBuilder::killMatchingIndexBuilds(criteria);
+        }
+
         bool run(const string& dbname, BSONObj& jsobj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
+
+            stopIndexBuilds(dbname, jsobj);
             BackgroundOperation::assertNoBgOpInProgForDb(dbname.c_str());
 
             string shortSource = jsobj.getStringField( "convertToCapped" );

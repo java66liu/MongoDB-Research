@@ -267,6 +267,9 @@ namespace mongo {
 
         signal(SIGTERM, sighandler);
         signal(SIGINT, sighandler);
+#if defined(SIGXCPU)
+        signal(SIGXCPU, sighandler);
+#endif
 
 #if defined(SIGQUIT)
         signal( SIGQUIT , printStackAndExit );
@@ -496,7 +499,12 @@ int mongoSMain(int argc, char* argv[], char** envp) {
 
     mongosCommand = argv[0];
 
-    mongo::runGlobalInitializersOrDie(argc, argv, envp);
+    Status status = mongo::runGlobalInitializers(argc, argv, envp);
+    if (!status.isOK()) {
+        severe() << "Failed global initialization: " << status;
+        ::_exit(EXIT_FAILURE);
+    }
+
     startupConfigActions(std::vector<std::string>(argv, argv + argc));
     cmdline_utils::censorArgvArray(argc, argv);
     try {

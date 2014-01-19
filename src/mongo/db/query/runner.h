@@ -30,6 +30,7 @@
 
 #include "mongo/base/status.h"
 #include "mongo/db/query/canonical_query.h"
+#include "mongo/db/invalidation_type.h"
 
 namespace mongo {
 
@@ -124,22 +125,27 @@ namespace mongo {
         /**
          * Get the next result from the query.
          *
-         * If objOut is not-NULL, it is filled with the next result, if there is one.  If there is
-         * not, getNext returns RUNNER_ERROR.
+         * If objOut is not NULL, only results that have a BSONObj are returned.  The BSONObj may
+         * point to on-disk data (isOwned will be false) and must be copied by the caller before
+         * yielding.
          *
-         * If dlOut is not-NULL:
-         *   If objOut is unowned, dlOut is set to its associated DiskLoc.
-         *   If objOut is owned, getNext returns RUNNER_ERROR.
+         * If dlOut is not NULL, only results that have a valid DiskLoc are returned.
          *
-         * If the caller is running a query, they only care about the object.
+         * If both objOut and dlOut are not NULL, only results with both a valid BSONObj and DiskLoc
+         * will be returned.  The BSONObj is the object located at the DiskLoc provided.
+         *
+         * If the underlying query machinery produces a result that does not have the data requested
+         * by the user, it will be silently dropped.
+         *
+         * If the caller is running a query, they probably only care about the object.
          * If the caller is an internal client, they may only care about DiskLocs (index scan), or
          * about object + DiskLocs (collection scan).
          *
          * Some notes on objOut and ownership:
          *
          * objOut may be an owned object in certain cases: invalidation of the underlying DiskLoc,
-         * object is created from covered index key data, object is projected or otherwise the
-         * result of a computation.
+         * the object is created from covered index key data, the object is projected or otherwise
+         * the result of a computation.
          *
          * objOut will be unowned if it's the result of a fetch or a collection scan.
          */
@@ -152,13 +158,15 @@ namespace mongo {
         virtual bool isEOF() = 0;
 
         /**
-         * Inform the runner that the provided DiskLoc is about to disappear (or change entirely).
-         * The runner then takes any actions required to continue operating correctly, including
+         * Inform the runner about changes to DiskLoc(s) that occur while the runner is yielded.
+         * The runner must take any actions required to continue operating correctly, including
          * broadcasting the invalidation request to the PlanStage tree being run.
          *
-         * Called from ClientCursor::aboutToDelete.
+         * Called from ClientCursor::invalidateDocument.
+         *
+         * See db/invalidation_type.h for InvalidationType.
          */
-        virtual void invalidate(const DiskLoc& dl) = 0;
+        virtual void invalidate(const DiskLoc& dl, InvalidationType type) = 0;
 
         /**
          * Mark the Runner as no longer valid.  Can happen when a runner yields and the underlying

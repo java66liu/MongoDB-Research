@@ -67,7 +67,7 @@ namespace mongo {
          *
          * TODO: Consider outputting into a BSONObj or builder thereof.
          */
-        virtual void appendToString(stringstream* ss, int indent) const = 0;
+        virtual void appendToString(mongoutils::str::stream* ss, int indent) const = 0;
 
         //
         // Computed properties
@@ -136,13 +136,13 @@ namespace mongo {
         /**
          * Formatting helper used by toString().
          */
-        static void addIndent(stringstream* ss, int level);
+        static void addIndent(mongoutils::str::stream* ss, int level);
 
         /**
          * Every solution node has properties and this adds the debug info for the
          * properties.
          */
-        void addCommon(stringstream* ss, int indent) const;
+        void addCommon(mongoutils::str::stream* ss, int indent) const;
 
     private:
         MONGO_DISALLOW_COPYING(QuerySolutionNode);
@@ -180,9 +180,9 @@ namespace mongo {
                 return "empty query solution";
             }
 
-            stringstream ss;
+            mongoutils::str::stream ss;
             root->appendToString(&ss, 0);
-            return ss.str();
+            return ss;
         }
     private:
         MONGO_DISALLOW_COPYING(QuerySolution);
@@ -194,7 +194,7 @@ namespace mongo {
 
         virtual StageType getType() const { return STAGE_TEXT; }
 
-        virtual void appendToString(stringstream* ss, int indent) const;
+        virtual void appendToString(mongoutils::str::stream* ss, int indent) const;
 
         // text's return is LOC_AND_UNOWNED_OBJ so it's fetched and has all fields.
         bool fetched() const { return true; }
@@ -215,7 +215,7 @@ namespace mongo {
 
         virtual StageType getType() const { return STAGE_COLLSCAN; }
 
-        virtual void appendToString(stringstream* ss, int indent) const;
+        virtual void appendToString(mongoutils::str::stream* ss, int indent) const;
 
         bool fetched() const { return true; }
         bool hasField(const string& field) const { return true; }
@@ -242,7 +242,7 @@ namespace mongo {
 
         virtual StageType getType() const { return STAGE_AND_HASH; }
 
-        virtual void appendToString(stringstream* ss, int indent) const;
+        virtual void appendToString(mongoutils::str::stream* ss, int indent) const;
 
         bool fetched() const;
         bool hasField(const string& field) const;
@@ -258,7 +258,7 @@ namespace mongo {
 
         virtual StageType getType() const { return STAGE_AND_SORTED; }
 
-        virtual void appendToString(stringstream* ss, int indent) const;
+        virtual void appendToString(mongoutils::str::stream* ss, int indent) const;
 
         bool fetched() const;
         bool hasField(const string& field) const;
@@ -274,7 +274,7 @@ namespace mongo {
 
         virtual StageType getType() const { return STAGE_OR; }
 
-        virtual void appendToString(stringstream* ss, int indent) const;
+        virtual void appendToString(mongoutils::str::stream* ss, int indent) const;
 
         bool fetched() const;
         bool hasField(const string& field) const;
@@ -296,7 +296,7 @@ namespace mongo {
 
         virtual StageType getType() const { return STAGE_SORT_MERGE; }
 
-        virtual void appendToString(stringstream* ss, int indent) const;
+        virtual void appendToString(mongoutils::str::stream* ss, int indent) const;
 
         bool fetched() const;
         bool hasField(const string& field) const;
@@ -324,7 +324,7 @@ namespace mongo {
 
         virtual StageType getType() const { return STAGE_FETCH; }
 
-        virtual void appendToString(stringstream* ss, int indent) const;
+        virtual void appendToString(mongoutils::str::stream* ss, int indent) const;
 
         bool fetched() const { return true; }
         bool hasField(const string& field) const { return true; }
@@ -342,7 +342,7 @@ namespace mongo {
 
         virtual StageType getType() const { return STAGE_IXSCAN; }
 
-        virtual void appendToString(stringstream* ss, int indent) const;
+        virtual void appendToString(mongoutils::str::stream* ss, int indent) const;
 
         bool fetched() const { return false; }
         bool hasField(const string& field) const;
@@ -353,9 +353,6 @@ namespace mongo {
 
         BSONObj indexKeyPattern;
         bool indexIsMultiKey;
-
-        // Only set for 2d.
-        int limit;
 
         int direction;
 
@@ -378,7 +375,7 @@ namespace mongo {
 
         virtual StageType getType() const { return STAGE_PROJECTION; }
 
-        virtual void appendToString(stringstream* ss, int indent) const;
+        virtual void appendToString(mongoutils::str::stream* ss, int indent) const;
 
         /**
          * This node changes the type to OWNED_OBJ.  There's no fetching possible after this.
@@ -423,7 +420,7 @@ namespace mongo {
 
         virtual StageType getType() const { return STAGE_SORT; }
 
-        virtual void appendToString(stringstream* ss, int indent) const;
+        virtual void appendToString(mongoutils::str::stream* ss, int indent) const;
 
         bool fetched() const { return children[0]->fetched(); }
         bool hasField(const string& field) const { return children[0]->hasField(field); }
@@ -455,7 +452,7 @@ namespace mongo {
 
         virtual StageType getType() const { return STAGE_LIMIT; }
 
-        virtual void appendToString(stringstream* ss, int indent) const;
+        virtual void appendToString(mongoutils::str::stream* ss, int indent) const;
 
         bool fetched() const { return children[0]->fetched(); }
         bool hasField(const string& field) const { return children[0]->hasField(field); }
@@ -470,7 +467,7 @@ namespace mongo {
         virtual ~SkipNode() { }
 
         virtual StageType getType() const { return STAGE_SKIP; }
-        virtual void appendToString(stringstream* ss, int indent) const;
+        virtual void appendToString(mongoutils::str::stream* ss, int indent) const;
 
         bool fetched() const { return children[0]->fetched(); }
         bool hasField(const string& field) const { return children[0]->hasField(field); }
@@ -491,7 +488,7 @@ namespace mongo {
         virtual ~Geo2DNode() { }
 
         virtual StageType getType() const { return STAGE_GEO_2D; }
-        virtual void appendToString(stringstream* ss, int indent) const;
+        virtual void appendToString(mongoutils::str::stream* ss, int indent) const;
 
         bool fetched() const { return false; }
         bool hasField(const string& field) const;
@@ -509,7 +506,7 @@ namespace mongo {
         virtual ~GeoNear2DNode() { }
 
         virtual StageType getType() const { return STAGE_GEO_NEAR_2D; }
-        virtual void appendToString(stringstream* ss, int indent) const;
+        virtual void appendToString(mongoutils::str::stream* ss, int indent) const;
 
         bool fetched() const { return true; }
         bool hasField(const string& field) const { return true; }
@@ -530,7 +527,7 @@ namespace mongo {
         virtual ~GeoNear2DSphereNode() { }
 
         virtual StageType getType() const { return STAGE_GEO_NEAR_2DSPHERE; }
-        virtual void appendToString(stringstream* ss, int indent) const;
+        virtual void appendToString(mongoutils::str::stream* ss, int indent) const;
 
         bool fetched() const { return true; }
         bool hasField(const string& field) const { return true; }
@@ -562,7 +559,7 @@ namespace mongo {
         virtual ~ShardingFilterNode() { }
 
         virtual StageType getType() const { return STAGE_SHARDING_FILTER; }
-        virtual void appendToString(stringstream* ss, int indent) const;
+        virtual void appendToString(mongoutils::str::stream* ss, int indent) const;
 
         bool fetched() const { return children[0]->fetched(); }
         bool hasField(const string& field) const { return children[0]->hasField(field); }
